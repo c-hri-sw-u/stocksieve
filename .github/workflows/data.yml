@@ -8,9 +8,6 @@ name: data
 on:
   schedule:
     - cron: "0 8 * * 1-5"   # 北京时间工作日 16:00（收盘后）
-  push:   # 开发分支上改了数据流水线时跑一次（只更新数据，不部署网站）
-    branches: [claude/project-thread-3o62qb]
-    paths: [".github/workflows/data.yml", "app/sync.py", "scripts/export_site_data.py"]
   workflow_dispatch:
     inputs:
       full:
@@ -186,9 +183,8 @@ jobs:
 
   deploy:
     needs: publish
-    # GitHub Pages 只允许从默认分支发布。要写 always()：增量更新时全量下载那几步被跳过，
-    # 不写的话「跳过」会一路传下来，让发布也被跳过
-    if: always() && needs.publish.result == 'success' && github.ref == 'refs/heads/main'
+    # always()：增量运行时 download/merge 是 skipped，不加它这一步会被连带跳过
+    if: always() && needs.publish.result == 'success' && github.ref == 'refs/heads/main'   # GitHub Pages 只允许从默认分支发布
     runs-on: ubuntu-latest
     environment:
       name: github-pages
