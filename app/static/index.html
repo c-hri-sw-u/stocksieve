@@ -76,7 +76,19 @@
   .sum { display: flex; align-items: baseline; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
   .sum b { font-size: 20px; }
   .sum .m { color: var(--muted); font-size: 13px; }
-  .sum .act { margin-left: auto; display: flex; gap: 4px; }
+  .sum .act { margin-left: auto; display: flex; gap: 4px; align-items: center; }
+  .sum .meta { display: inline-flex; gap: 12px; align-items: baseline; min-width: 0; }
+  .ib { display: inline-flex; align-items: center; gap: 5px; }
+  @media (max-width: 639px) {
+    /* 窄屏：第一行只放数量和图标按钮，耗时和排序说明降到第二行 */
+    .sum { flex-wrap: wrap; row-gap: 2px; align-items: center; }
+    .sum .act { gap: 0; }
+    .sum .meta { order: 3; flex-basis: 100%; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; color: var(--muted); }
+    .sum .meta .m, .sum .meta .sorthint { font-size: 12px; }
+    .sum .meta .m::after { content: " "; }
+    .ib .bt, #favname, #favupd { display: none; }
+    .ib { padding: 6px 8px; }
+  }
   .link { background: none; border: none; color: var(--muted); font-size: 14px; padding: 4px 8px; border-radius: 6px; }
   .link:hover, .link[aria-expanded="true"] { color: var(--text); background: var(--hover); }
 
@@ -221,6 +233,16 @@
   .prog-meta span:last-child { color: var(--muted); }
   .result { font-size: 14px; margin: 0 0 14px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
   .result.bad { color: var(--err); }
+
+  /* 网页版数据状态：一行主状态 + 一行说明，按钮只在需要时出现 */
+  .dst { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 15px; }
+  .dst b { font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+  .dst b.ok { color: var(--ok); } .dst b.bad { color: var(--err); } .dst b.new { color: var(--warn); }
+  .dsub { font-size: 13px; color: var(--muted); margin: 4px 0 16px; }
+  .spin { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--text); border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .dfoot { margin-top: 28px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--muted); }
+  .sdot.new { background: var(--warn); opacity: 1; }
 
   /* AI 设置 */
   .sdot.bad { background: var(--err); opacity: 1; }
@@ -496,8 +518,8 @@ async function init() {
   pollData();
   if (STATIC) {
     // 第一次打开：自动开始下载并打开数据面板；之后每次打开：后台检查并只下载变化的文件
-    if (meta.status.demo) { XG_STATIC.persist(); openDrawer("drawer"); startSync("update"); }
-    else { startSync("update"); setTimeout(() => XG_STATIC.preload(), 800); }
+    if (meta.status.demo && !XG_STATIC.index().remote) { XG_STATIC.persist(); openDrawer("drawer"); startSync("update"); }  // 第一次打开：自动下载
+    else { checkUpdate(); if (!meta.status.demo) setTimeout(() => XG_STATIC.preload(), 800); }
   }
 }
 
@@ -549,6 +571,14 @@ async function run(opts = {}) {
   } finally { $("#run").disabled = false; }
 }
 
+// 结果摘要行的图标（窄屏只显示图标）
+const IC = {
+  star: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg>`,
+  starOn: `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg>`,
+  rule: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5"/></svg>`,
+  csv: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>`,
+};
+
 function render(j) {
   state.data = j; state.showAll = false;
   if (j.ok) buildCols(j, state.pendingCols);
@@ -559,8 +589,8 @@ function render(j) {
   state.sort = state.defaultSort;
   const fail = !j.ok;
   let h = `<div class="sum">`;
-  h += fail ? `<b>筛选失败</b>` : `<b>${j.total} 只</b><span class="m">${j.seconds} 秒${j.demo ? " · 示例数据" : ""}</span><span class="sorthint" id="sorthint"></span>`;
-  h += `<span class="act">${fail ? "" : `<button class="link star" id="fav" aria-pressed="false"></button>`}<button class="link" id="tg" aria-expanded="${fail}">规则</button>${fail ? "" : `<button class="link" id="csv">导出</button>`}</span></div>`;
+  h += fail ? `<b>筛选失败</b>` : `<b>${j.total} 只</b><span class="meta"><span class="m">${j.seconds} 秒${j.demo ? " · 示例数据" : ""}</span><span class="sorthint" id="sorthint"></span></span>`;
+  h += `<span class="act">${fail ? "" : `<button class="link star" id="fav" aria-pressed="false"></button>`}<button class="link ib" id="tg" aria-expanded="${fail}" aria-label="规则">${IC.rule}<span class="bt">规则</span></button>${fail ? "" : `<button class="link ib" id="csv" aria-label="导出 CSV">${IC.csv}<span class="bt">导出</span></button>`}</span></div>`;
   if (j.code) h += `<form class="refine" id="refine" autocomplete="off"><input id="refineq" placeholder="在当前结果上修改，例如：排除 ST、市值大于 50 亿" aria-label="修改当前规则"><button id="refinego" aria-label="提交修改" title="提交修改（回车）"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></form><div class="refstat" id="refstat" role="status"></div>`;
   h += `<div id="vers"></div>`;
   h += `<div class="rule${fail ? " on" : ""}" id="rule">`;
@@ -776,7 +806,9 @@ function drawFav() {
   b.setAttribute("aria-pressed", !!hit);
   $("#favname")?.remove(); $("#favupd")?.remove();
   const origin = !hit && state.originSaved ? loadSaved().find((x) => x.id === state.originSaved) : null;
-  b.textContent = hit ? "★ 已收藏" : origin ? "☆ 另存为新收藏" : "☆ 收藏";
+  b.classList.add("ib");
+  b.innerHTML = (hit ? IC.starOn : IC.star) + `<span class="bt">${hit ? "已收藏" : origin ? "另存为新收藏" : "收藏"}</span>`;
+  b.setAttribute("aria-label", hit ? "已收藏，点击取消" : origin ? "另存为新收藏" : "收藏");
   b.title = hit ? "取消收藏" : "收藏这条规则";
   if (origin) {
     // 从收藏打开后又修改过：默认另存为新收藏，也可以覆盖原来那条
@@ -1182,7 +1214,10 @@ function openDrawer(id = "drawer") {
   openPanel.classList.add("open");
   document.body.classList.add("drawer-open");
   openPanel.querySelector(".dh .ghost").focus();
-  if (id === "drawer") { $("#dataBtn").setAttribute("aria-expanded", "true"); pollData(); }
+  if (id === "drawer") {
+    $("#dataBtn").setAttribute("aria-expanded", "true");
+    if (STATIC && ds.sync.state !== "running" && Date.now() - (ds.lastCheck || 0) > 30000) checkUpdate(); else pollData();
+  }
 }
 function closeDrawer(restore = true) {
   if (!openPanel) return;
@@ -1210,7 +1245,7 @@ async function pollData() {
   try {
     const j = await (await fetch("/api/data/status")).json();
     const was = ds.sync.state, prevStocks = ds.data?.stocks, prevLast = ds.data?.last_date;
-    ds.data = j.data; ds.sync = j.sync;
+    ds.data = j.data; ds.sync = j.sync; ds.check = j.check || null;
     if (state.meta && (j.data.stocks !== prevStocks || j.data.last_date !== prevLast || j.data.demo !== state.meta.status.demo)) {
       state.meta.status = j.data;  // 主页面的数据范围跟着更新，不用刷新页面
       if ($("#range").value !== "custom") applyRange();
@@ -1220,8 +1255,10 @@ async function pollData() {
       ds.samples = ds.samples.filter((s) => Date.now() - s.t < 90000);
     } else ds.samples = [];
     renderData();
-    if (ds.sync.state === "running") ds.timer = setTimeout(pollData, 1500);
+    if (ds.sync.state === "running" || ds.check?.state === "checking") ds.timer = setTimeout(pollData, ds.sync.state === "running" ? 1500 : 400);
     else if (was === "running") ds.justFinished = true;
+    // 「已更新到 …」显示 2 秒后变回「已是最新」
+    if (STATIC && ds.sync.state === "done" && Date.now() - (ds.sync.done_at || 0) < 2000) setTimeout(renderData, 2050 - (Date.now() - ds.sync.done_at));
   } catch (e) {
     ds.timer = setTimeout(pollData, 5000);
   }
@@ -1252,19 +1289,26 @@ function renderData() {
   else if (d.demo) tip = "示例数据，还没有下载真实行情";
   else if (d.last_date >= expectedDate()) { cls = "ok"; tip = `数据已是最新（截至 ${d.last_date}）`; }
   else { cls = "stale"; tip = `数据截至 ${d.last_date}，可以更新`; }
+  if (STATIC && !running) {  // 网页版：按「检查更新」的结果显示
+    const c = ds.check?.state;
+    if (ds.sync.state === "error" || c === "error") { cls = "bad"; tip = "检查或下载失败"; }
+    else if (c === "checking") { cls = "run"; tip = "正在检查更新"; }
+    else if (c === "available") { cls = "new"; tip = `有新数据：${ds.check.last_date}`; }
+    else if (d.demo || c === "none") { cls = ""; tip = "还没有行情数据"; }
+    else { cls = "ok"; tip = `已是最新（数据截至 ${d.last_date}）`; }
+  }
   dot.className = "sdot " + cls;
   $("#dataBtn").title = tip;
 
   // 当前数据
   const mb = (x) => (x ? `${Number(x).toFixed(x >= 10 ? 0 : 1)} MB` : "");
   if (STATIC && d.demo) {
-    $("#dcur").innerHTML = `<dl class="kv"><dt>市场</dt><dd>A股</dd><dt>本机</dt><dd>还没有行情数据（现在用的是随机示例数据）</dd></dl>
-      <p class="note">行情数据会下载到这个浏览器里${d.remote?.total_size ? `，约 ${mb(d.remote.total_size / 1e6)}` : ""}。之后每次打开只下载变化的部分。</p>`;
+    $("#dcur").innerHTML = `<dl class="kv"><dt>市场</dt><dd>A股</dd><dt>本机</dt><dd>未下载（现在用的是随机示例数据）</dd></dl>`;
   } else if (STATIC) {
     $("#dcur").innerHTML = `<dl class="kv">
       <dt>市场</dt><dd>A股 · ${Number(d.stocks).toLocaleString()} 只</dd>
       <dt>时间</dt><dd>${esc(d.first_date)} ~ ${esc(d.last_date)}</dd>
-      <dt>本机</dt><dd>已缓存 ${mb(d.cached_mb)}${d.remote?.last_date ? ` · 网站最新 ${esc(d.remote.last_date)}` : ""}</dd>
+      <dt>本机</dt><dd>已缓存 ${mb(d.cached_mb)}</dd>
       <dt>来源</dt><dd>列表 ${esc(d.list_source || "新浪")} · 日线 ${esc(d.daily_source || "东方财富")} · 行业 ${esc(d.industry_source || "暂无")}</dd></dl>`;
   } else if (d.demo) {
     $("#dcur").innerHTML = `<dl class="kv"><dt>市场</dt><dd>A股</dd><dt>数据</dt><dd>随机示例数据 · ${d.stocks} 只</dd></dl>
@@ -1310,13 +1354,11 @@ function renderData() {
   } else {
     ds.cancelling = false;
     const f = s.failed?.length || 0;
-    if (s.state === "done") h += `<p class="result"><span>${esc(s.message || `完成 · ${Number(d.stocks || 0).toLocaleString()} 只 · 失败 ${f} 只`)}</span>${f ? `<button class="tlink" id="dretry">重试失败的 ${f} 只</button>` : ""}</p>`;
+    if (STATIC) {} else if (s.state === "done") h += `<p class="result"><span>${esc(s.message || `完成 · ${Number(d.stocks || 0).toLocaleString()} 只 · 失败 ${f} 只`)}</span>${f ? `<button class="tlink" id="dretry">重试失败的 ${f} 只</button>` : ""}</p>`;
     else if (s.state === "cancelled") h += `<p class="result"><span>${esc(s.message || "已取消")}</span>${f ? `<button class="tlink" id="dretry">重试失败的 ${f} 只</button>` : ""}</p>`;
     else if (s.state === "error" || s.state === "interrupted") h += `<p class="result bad"><span>${s.state === "error" ? "下载出错：" : ""}${esc(s.message)}</span></p>`;
     if (STATIC) {
-      h += `<button class="primary" id="dupdate">${d.demo ? "下载行情数据" : "更新到最新"}</button>`;
-      h += `<div class="sub"><span>数据由网站每个交易日收盘后自动更新</span>${d.demo ? "" : `<button class="tlink" id="dclear">清除本地数据</button>`}</div>`;
-      h += `<p class="note">数据存在这个浏览器里，换浏览器或清除网站数据后需要重新下载。可以关掉这个面板，下载会在后台继续。</p>`;
+      h = staticSyncHTML(d, s);
     } else {
     h += `<button class="primary" id="dupdate">更新到最新</button>`;
     h += `<div class="sub"><span class="select"><select id="dyears" aria-label="历史长度">
@@ -1327,12 +1369,49 @@ function renderData() {
   }
   $("#dsync").innerHTML = h;
   {
-    $("#dupdate").onclick = () => { if (STATIC) XG_STATIC.persist(); startSync("update"); };
+    $("#dupdate")?.addEventListener("click", () => { if (STATIC) XG_STATIC.persist(); startSync("update"); });
+    $("#dcheck")?.addEventListener("click", checkUpdate);
     $("#dfull")?.addEventListener("click", () => { if (confirm(`重新下载全部股票最近 ${ds.years} 年的日线？大约需要 1 小时。`)) startSync("full"); });
     $("#dyears")?.addEventListener("change", (e) => { ds.years = +e.target.value; });
     $("#dclear")?.addEventListener("click", () => { if (confirm("清除这个浏览器里保存的行情数据？之后需要重新下载。")) startSync("clear"); });
     $("#dretry")?.addEventListener("click", () => startSync("retry_failed"));
   }
+}
+
+// 网页版数据面板：检查中 / 已是最新 / 有新数据 / 完成 / 失败 / 还没有数据
+function staticSyncHTML(d, s) {
+  const c = ds.check || {}, md = (x) => (x || "").slice(5);
+  const justDone = s.state === "done" && Date.now() - (s.done_at || 0) < 2000;
+  let main, sub = "", btn = "", link = "";
+  if (s.state === "error") {
+    main = `<b class="bad">下载失败，可能是网络问题</b>`; sub = esc(s.message || "");
+    btn = `<button class="primary" id="dupdate">重试</button>`;
+  } else if (justDone) {
+    main = `<b class="ok">✓ 已更新到 ${esc(md(s.updated_to))}</b>`; sub = "";
+  } else if (c.state === "checking" || (!c.state || c.state === "idle")) {
+    main = `<b><span class="spin" aria-hidden="true"></span>正在检查更新…</b>`;
+  } else if (c.state === "error") {
+    main = `<b class="bad">检查失败，可能是网络问题</b>`; sub = esc(c.message || "");
+    btn = `<button class="primary" id="dcheck">重试</button>`;
+  } else if (d.demo || c.state === "none") {
+    main = `<b>还没有数据</b>`; sub = "行情数据会下载到这个浏览器里，之后每次只下载变化的部分";
+    btn = `<button class="primary" id="dupdate">下载数据${c.total_mb ? `（约 ${Math.round(c.total_mb)} MB）` : ""}</button>`;
+  } else if (c.state === "available") {
+    const size = c.bytes < 1e6 ? `${Math.max(1, Math.round(c.bytes / 1e3))} KB` : `${c.mb} MB`;
+    main = `<b class="new">有新数据：${esc(md(c.last_date))}</b>`; sub = `需要下载约 ${size}`;
+    btn = `<button class="primary" id="dupdate">更新</button>`;
+  } else {
+    main = `<b class="ok">✓ 已是最新</b>`; sub = `数据截至 ${esc(d.last_date)} · 每个交易日 16:00 后更新`;
+    link = `<button class="tlink" id="dcheck">重新检查</button>`;
+  }
+  let h = `<div class="dst" role="status">${main}${link}</div><p class="dsub">${sub}</p>${btn}`;
+  h += `<div class="dfoot"><span>数据存在这个浏览器里</span>${d.demo ? "" : `<button class="tlink" id="dclear">清除本地数据</button>`}</div>`;
+  return h;
+}
+async function checkUpdate() {
+  ds.lastCheck = Date.now();
+  await fetch("/api/data/check", { method: "POST" });
+  pollData();
 }
 
 async function startSync(mode) {
