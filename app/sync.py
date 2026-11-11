@@ -129,7 +129,19 @@ def fetch_one_tx(ak, code: str, start: str, end: str) -> pd.DataFrame:
 
 
 def fetch_one(ak, code: str, start: str, end: str, sources: dict | None = None) -> pd.DataFrame:
-    # 先用腾讯（东财日线接口经常限流超时），失败或没数据再用东财
+    # 东财在国内家用网络经常超时，所以默认先用腾讯；在 GitHub Actions（美国）上东财又快又稳，设 XG_PREFER_EM=1 先用东财
+    if os.environ.get("XG_PREFER_EM"):
+        try:
+            df = _retry(ak.stock_zh_a_hist, symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq", tries=2)
+            if df is not None and not df.empty:
+                if sources is not None:
+                    sources["em"] += 1
+                df = df.rename(columns=HIST_RENAME)
+                df["code"] = code
+                df["date"] = pd.to_datetime(df["date"])
+                return df[DAILY_COLUMNS]
+        except Exception:
+            pass
     try:
         df = fetch_one_tx(ak, code, start, end)
         if not df.empty:
@@ -147,6 +159,10 @@ def fetch_one(ak, code: str, start: str, end: str, sources: dict | None = None) 
     df["code"] = code
     df["date"] = pd.to_datetime(df["date"])
     return df[DAILY_COLUMNS]
+
+
+def DAILY_LABEL() -> str:
+    return "东方财富（腾讯备用）" if os.environ.get("XG_PREFER_EM") else "腾讯（东方财富备用）"
 
 
 PHASES = {"list": "获取股票列表", "industry": "下载行业分类", "daily": "下载日线", "append": "写入新数据", "merge": "合并数据"}
@@ -263,6 +279,9 @@ def main() -> None:
     ap.add_argument("--incremental", action="store_true", help="只补最新交易日（已有数据时）")
     ap.add_argument("--industry", action="store_true", help="强制重新下载行业分类（默认 7 天内用缓存）")
     ap.add_argument("--industry-only", action="store_true", help="只更新行业分类，不下载日线")
+    ap.add_argument("--chunk", default="", help="只下载第 i 组（共 N 组），格式 i/N，不合并；给并行下载用")
+    ap.add_argument("--merge-only", action="store_true", help="不下载，只把 hist/ 里已有的文件合并成 daily.parquet")
+    ap.add_argument("--list-only", action="store_true", help="只获取股票列表和行业分类（给并行下载做准备）")
     ap.add_argument("--no-industry", action="store_true", help="不下载行业分类（有缓存就用缓存）")
     args = ap.parse_args()
 
@@ -306,6 +325,10 @@ def run(args, out: Path, hist_dir: Path, cancel_flag: Path, last_failed: list, s
     ind = load_industry(out) if args.no_industry else ensure_industry(ak, out, spot["code"].tolist(), status, force=args.industry or args.full)
     spot = apply_industry(spot, ind)
     stocks = spot[STOCK_COLUMNS].reset_index(drop=True)
+    if args.list_only:
+        status.update(state="done", finished_at=_now(), message=f"股票列表 {len(stocks)} 只（{list_source}）")
+        print(f"股票列表：{len(stocks)} 只，来源 {list_source}")
+        return
 
     end = date.today()
     start = end - timedelta(days=365 * args.years)
@@ -322,11 +345,17 @@ def run(args, out: Path, hist_dir: Path, cancel_flag: Path, last_failed: list, s
             if not args.full and f.exists() and datetime.fromtimestamp(f.stat().st_mtime).date() == today:
                 continue
             todo.append(c)
+    if args.merge_only:
+        todo = []
+    if args.chunk:
+        i, n = (int(x) for x in args.chunk.split("/"))
+        todo = [c for k, c in enumerate(todo) if k % n == i]
     print(f"下载日线：共 {len(codes)} 只，需要下载 {len(todo)} 只（{s} ~ {e}，前复权）")
     sources = {"tx": 0, "em": 0}
-    status.update(phase="daily", done=0, total=len(todo), daily_source="腾讯（东方财富备用）")
-    extra = {"source": f"列表 {list_source} / 日线 腾讯", "list_source": list_source,
-             "daily_source": "腾讯（东方财富备用）", "years": args.years, "last_mode": status.s["mode_label"],
+    daily_label = DAILY_LABEL()
+    status.update(phase="daily", done=0, total=len(todo), daily_source=daily_label)
+    extra = {"source": f"列表 {list_source} / 日线 {daily_label}", "list_source": list_source,
+             "daily_source": daily_label, "years": args.years, "last_mode": status.s["mode_label"],
              "industry_source": ind["source"].iloc[0] if ind is not None and not ind.empty else ""}
 
     failed: list[str] = []
@@ -357,10 +386,18 @@ def run(args, out: Path, hist_dir: Path, cancel_flag: Path, last_failed: list, s
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
 
+    if args.chunk:  # 并行下载的一组：只写 hist/，合并交给最后一步
+        status.update(state="done", finished_at=_now(), message=f"第 {args.chunk} 组完成 · 失败 {len(failed)} 只")
+        write_json(out / f"failed_{args.chunk.replace('/', '_')}.json", failed)
+        print(f"第 {args.chunk} 组完成：{len(todo)} 只，失败 {len(failed)} 只")
+        return
     if sources["em"] and not sources["tx"]:
         extra["daily_source"] = "东方财富"
     elif sources["em"]:
         extra["daily_source"] = f"腾讯 {sources['tx']} 只 / 东方财富 {sources['em']} 只"
+    if args.merge_only:  # 合并并行下载的各组：把各组失败的代码汇总起来
+        for f in out.glob("failed_*.json"):
+            failed += json.loads(f.read_text())
     status.update(phase="merge", daily_source=extra["daily_source"])
     print("合并日线…")
     meta = merge(out, hist_dir, stocks, {**extra, "failed": failed, "partial": cancelled})
@@ -452,6 +489,16 @@ def append_rows(hist_dir: Path, rows: pd.DataFrame, status: "Status", cancel_fla
     return len(groups)
 
 
+def ensure_hist(out: Path, hist_dir: Path) -> None:
+    """全新的机器上（比如 GitHub Actions）只有合并好的 daily.parquet：按股票拆回 hist/，增量更新和合并都基于它。"""
+    if any(hist_dir.glob("*.parquet")) or not (out / "daily.parquet").exists():
+        return
+    daily = pd.read_parquet(out / "daily.parquet")
+    print(f"从 daily.parquet 拆出 {daily['code'].nunique()} 只股票的单独文件…")
+    for code, g in daily.groupby("code"):
+        g[DAILY_COLUMNS].to_parquet(hist_dir / f"{code}.parquet", index=False)
+
+
 def run_incremental(args, out: Path, hist_dir: Path, cancel_flag: Path, status: "Status") -> None:
     """只补最新的交易日：
     - 只缺 1 个交易日且行情快照是收盘后的：直接用全市场快照追加一行（几十个请求），除权除息和新股整只重下；
@@ -460,6 +507,7 @@ def run_incremental(args, out: Path, hist_dir: Path, cancel_flag: Path, status: 
     """
     import akshare as ak
 
+    ensure_hist(out, hist_dir)
     daily = pd.read_parquet(out / "daily.parquet", columns=["date", "code", "close"])
     daily = daily.sort_values(["code", "date"])
     last_close = daily.groupby("code")["close"].last()

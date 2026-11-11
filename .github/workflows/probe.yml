@@ -3,10 +3,7 @@
 name: probe data sources
 
 on:
-  workflow_dispatch:
-  push:
-    branches: [claude/project-thread-3o62qb]
-    paths: [".github/workflows/probe.yml", "scripts/probe_sources.py"]
+  workflow_dispatch:   # 只手动运行
 
 jobs:
   probe:
