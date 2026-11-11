@@ -263,7 +263,7 @@ def main() -> None:
     ap.add_argument("--incremental", action="store_true", help="只补最新交易日（已有数据时）")
     ap.add_argument("--industry", action="store_true", help="强制重新下载行业分类（默认 7 天内用缓存）")
     ap.add_argument("--industry-only", action="store_true", help="只更新行业分类，不下载日线")
-    ap.add_argument("--no-industry", action="store_true", help=argparse.SUPPRESS)  # 兼容旧参数，现在默认就不下
+    ap.add_argument("--no-industry", action="store_true", help="不下载行业分类（有缓存就用缓存）")
     args = ap.parse_args()
 
     out = market_dir(MARKET)
@@ -303,7 +303,7 @@ def run(args, out: Path, hist_dir: Path, cancel_flag: Path, last_failed: list, s
     if args.limit:
         spot = spot.head(args.limit)
 
-    ind = ensure_industry(ak, out, spot["code"].tolist(), status, force=args.industry or args.full)
+    ind = load_industry(out) if args.no_industry else ensure_industry(ak, out, spot["code"].tolist(), status, force=args.industry or args.full)
     spot = apply_industry(spot, ind)
     stocks = spot[STOCK_COLUMNS].reset_index(drop=True)
 
@@ -491,7 +491,7 @@ def run_incremental(args, out: Path, hist_dir: Path, cancel_flag: Path, status: 
     old_stocks = apply_industry(old_stocks, None)
     stocks = pd.concat([apply_industry(fresh, None)[STOCK_COLUMNS],
                         old_stocks[~old_stocks["code"].isin(fresh["code"])][STOCK_COLUMNS]], ignore_index=True)
-    ind = ensure_industry(ak, out, stocks["code"].tolist(), status)
+    ind = load_industry(out) if args.no_industry else ensure_industry(ak, out, stocks["code"].tolist(), status)
     stocks = apply_industry(stocks, ind)
     if args.limit:  # 调试用：只处理本地已有的前 N 只
         stocks = stocks[stocks["code"].isin(last_close.index)].head(args.limit)
