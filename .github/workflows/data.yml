@@ -8,9 +8,6 @@ name: data
 on:
   schedule:
     - cron: "0 8 * * 1-5"   # 北京时间工作日 16:00（收盘后）
-  push:   # 开发分支上改了数据流水线时跑一次（只更新数据，不部署网站）
-    branches: [claude/project-thread-3o62qb]
-    paths: [".github/workflows/data.yml", "app/sync.py", "scripts/export_site_data.py"]
   workflow_dispatch:
     inputs:
       full:
