@@ -334,7 +334,11 @@ def run(args, out: Path, hist_dir: Path, cancel_flag: Path, last_failed: list, s
         print(f"股票列表：{len(stocks)} 只，来源 {list_source}")
         return
 
-    end = date.today()
+    # 只要已经收盘的交易日：盘中下载会拿到当天还没走完的半根 K 线
+    try:
+        end = latest_closed_day(trade_calendar(ak, out), beijing_now())
+    except Exception:
+        end = date.today() - timedelta(days=1)
     start = end - timedelta(days=365 * args.years)
     s, e = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
     today = datetime.now().date()
@@ -519,6 +523,17 @@ def run_incremental(args, out: Path, hist_dir: Path, cancel_flag: Path, status: 
 
     cal = trade_calendar(ak, out)
     target = latest_closed_day(cal, beijing_now())
+    if last_date > target:
+        # 本地有还没收盘时下载的当天数据（半根 K 线）：删掉，等收盘后重新补
+        print(f"去掉 {target} 之后还没收盘的数据")
+        for f in hist_dir.glob("*.parquet"):
+            h = pd.read_parquet(f)
+            if len(h) and h["date"].max().date() > target:
+                h = h[h["date"].dt.date <= target]
+                write_atomic(f, lambda t: h.to_parquet(t, index=False))
+        daily = daily[daily["date"].dt.date <= target]
+        last_close = daily.groupby("code")["close"].last()
+        last_date = daily["date"].max().date()
     missing = [d for d in cal if last_date < d <= target]
     print(f"本地数据截至 {last_date}，最近收盘交易日 {target}，缺 {len(missing)} 个交易日")
 

@@ -72,7 +72,7 @@ jobs:
     timeout-minutes: 15
     continue-on-error: true
     env:
-      XG_SW_BUDGET: "600"
+      XG_SW_BUDGET: "420"   # 申万最多 7 分钟（进度会保存，下次接着补），剩下的时间留给新浪退路
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
