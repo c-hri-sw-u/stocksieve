@@ -1,0 +1,40 @@
+# 探测：GitHub 的服务器（在美国）能不能连上我们用的 A 股数据源，以及下载速度。
+# 只读取公开行情接口，不需要任何密钥。
+name: probe data sources
+
+on:
+  workflow_dispatch:   # 只手动运行
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: 逐个数据源测试
+        run: python -u scripts/probe_sources.py
+        continue-on-error: true
+
+      - name: 用 app.sync 下载 50 只（1 年）
+        continue-on-error: true
+        run: |
+          start=$(date +%s)
+          timeout 900 python -u -m app.sync --limit 50 --years 1 --workers 6 --no-industry 2>&1 | tr '\r' '\n' | grep -v -E '^\s*$|it/s|s/it' | tail -30 || true
+          echo "SYNC_SECONDS=$(( $(date +%s) - start ))"
+          echo "--- meta.json ---"; cat data/cn_a/meta.json 2>/dev/null || echo "no meta"
+          echo "--- sizes ---"; ls -la data/cn_a/ 2>/dev/null || true
+          echo "hist files: $(ls data/cn_a/hist 2>/dev/null | wc -l)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cn_a-sample
+          path: data/cn_a
+          retention-days: 3
+          if-no-files-found: ignore

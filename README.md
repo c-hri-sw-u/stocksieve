@@ -45,6 +45,20 @@ python3 -m venv .venv
 
 数据存在 `data/cn_a/`（不进 git）。来源都是免费接口：股票列表用新浪（东方财富备用），日线用腾讯（东方财富备用，前复权），行业分类用申万（乐咕乐股，新浪备用）。暂时没有财报、资金流、概念板块等数据。
 
+## 网页版（GitHub Pages）
+
+不需要服务器：数据由 GitHub Actions 每个交易日收盘后更新（`.github/workflows/data.yml`），网页从同一网站下载数据存在浏览器里，筛选在浏览器里用 Pyodide 跑同一份 Python 代码，AI 由浏览器直接调用（key 只存在浏览器里）。
+
+- 数据：完整数据存在 Release `data-latest`（不进 git）；导出给网页的数据按年 / 月拆分，全量约 80 MB，之后每天只下载变化的小文件。
+- 需要在仓库 Settings → Pages 把 Source 设为「GitHub Actions」。手动全量更新：Actions → data → Run workflow，勾选 full。
+
+本地预览网页版：
+
+```bash
+.venv/bin/python scripts/build_web.py --limit 200 --years 1   # 用本地数据的一小部分
+.venv/bin/python -m http.server -d site 8080                  # 打开 http://127.0.0.1:8080
+```
+
 ## 工作原理
 
 ```

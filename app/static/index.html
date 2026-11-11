@@ -436,6 +436,7 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
+const STATIC = !!window.XG_STATIC;  // 静态网页版（GitHub Pages）：数据和计算都在浏览器里
 const state = { exampleId: null, meta: null, sort: null, data: null, current: null };
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
@@ -493,6 +494,11 @@ async function init() {
   refreshSavedCount();
   drawAIDot();
   pollData();
+  if (STATIC) {
+    // 第一次打开：自动开始下载并打开数据面板；之后每次打开：后台检查并只下载变化的文件
+    if (meta.status.demo) { XG_STATIC.persist(); openDrawer("drawer"); startSync("update"); }
+    else { startSync("update"); setTimeout(() => XG_STATIC.preload(), 800); }
+  }
 }
 
 async function run(opts = {}) {
@@ -509,7 +515,12 @@ async function run(opts = {}) {
   $("#run").disabled = true;
   let prog = null;
   if (viaAI) prog = progressIn($("#result"), "准备中");
-  else $("#result").innerHTML = `<div class="loading"><span class="dot"></span><span class="dot"></span><span class="dot"></span><div style="margin-top:10px">筛选中</div></div>`;
+  else {
+    $("#result").innerHTML = `<div class="loading"><span class="dot"></span><span class="dot"></span><span class="dot"></span><div style="margin-top:10px" id="ldmsg">筛选中</div></div>`;
+    if (STATIC) {  // 第一次要先在浏览器里启动 Python，显示当前在做什么
+      const t = setInterval(() => { const m = $("#ldmsg"); if (!m) return clearInterval(t); m.textContent = XG_STATIC.engine.stage ? `${XG_STATIC.engine.stage}（只有第一次需要）` : "筛选中"; }, 300);
+    }
+  }
   try {
     let j;
     if (viaAI) {
@@ -579,7 +590,7 @@ function render(j) {
 
 
 // ---------------------------------------------------------------- AI 流式请求：阶段 + 计时 + 思考过程
-const STAGES = { thinking: "思考中", writing: "写代码", running: "运行中", fixing: "自动修复" };
+const STAGES = { loading: "载入数据和 Python 环境", thinking: "思考中", writing: "写代码", running: "运行中", fixing: "自动修复" };
 function progressHTML(first) {
   return `<div class="aiprog"><span class="st"><span class="dot"></span><span class="dot"></span><span class="dot"></span><b class="sg">${first}</b> · <span class="tm">0s</span></span>
     <details class="think" hidden><summary>查看思考过程</summary><div class="tx"></div></details></div>`;
@@ -1245,7 +1256,17 @@ function renderData() {
   $("#dataBtn").title = tip;
 
   // 当前数据
-  if (d.demo) {
+  const mb = (x) => (x ? `${Number(x).toFixed(x >= 10 ? 0 : 1)} MB` : "");
+  if (STATIC && d.demo) {
+    $("#dcur").innerHTML = `<dl class="kv"><dt>市场</dt><dd>A股</dd><dt>本机</dt><dd>还没有行情数据（现在用的是随机示例数据）</dd></dl>
+      <p class="note">行情数据会下载到这个浏览器里${d.remote?.total_size ? `，约 ${mb(d.remote.total_size / 1e6)}` : ""}。之后每次打开只下载变化的部分。</p>`;
+  } else if (STATIC) {
+    $("#dcur").innerHTML = `<dl class="kv">
+      <dt>市场</dt><dd>A股 · ${Number(d.stocks).toLocaleString()} 只</dd>
+      <dt>时间</dt><dd>${esc(d.first_date)} ~ ${esc(d.last_date)}</dd>
+      <dt>本机</dt><dd>已缓存 ${mb(d.cached_mb)}${d.remote?.last_date ? ` · 网站最新 ${esc(d.remote.last_date)}` : ""}</dd>
+      <dt>来源</dt><dd>列表 ${esc(d.list_source || "新浪")} · 日线 ${esc(d.daily_source || "东方财富")} · 行业 ${esc(d.industry_source || "暂无")}</dd></dl>`;
+  } else if (d.demo) {
     $("#dcur").innerHTML = `<dl class="kv"><dt>市场</dt><dd>A股</dd><dt>数据</dt><dd>随机示例数据 · ${d.stocks} 只</dd></dl>
       <p class="note">还没有真实行情。点「更新到最新」下载全市场日线，下载过程中就能逐步用上。</p>`;
   } else {
@@ -1292,17 +1313,24 @@ function renderData() {
     if (s.state === "done") h += `<p class="result"><span>${esc(s.message || `完成 · ${Number(d.stocks || 0).toLocaleString()} 只 · 失败 ${f} 只`)}</span>${f ? `<button class="tlink" id="dretry">重试失败的 ${f} 只</button>` : ""}</p>`;
     else if (s.state === "cancelled") h += `<p class="result"><span>${esc(s.message || "已取消")}</span>${f ? `<button class="tlink" id="dretry">重试失败的 ${f} 只</button>` : ""}</p>`;
     else if (s.state === "error" || s.state === "interrupted") h += `<p class="result bad"><span>${s.state === "error" ? "下载出错：" : ""}${esc(s.message)}</span></p>`;
+    if (STATIC) {
+      h += `<button class="primary" id="dupdate">${d.demo ? "下载行情数据" : "更新到最新"}</button>`;
+      h += `<div class="sub"><span>数据由网站每个交易日收盘后自动更新</span>${d.demo ? "" : `<button class="tlink" id="dclear">清除本地数据</button>`}</div>`;
+      h += `<p class="note">数据存在这个浏览器里，换浏览器或清除网站数据后需要重新下载。可以关掉这个面板，下载会在后台继续。</p>`;
+    } else {
     h += `<button class="primary" id="dupdate">更新到最新</button>`;
     h += `<div class="sub"><span class="select"><select id="dyears" aria-label="历史长度">
       ${[1, 3, 5].map((y) => `<option value="${y}"${y === ds.years ? " selected" : ""}>历史 ${y} 年</option>`).join("")}
       </select></span><button class="tlink" id="dfull">全部重新下载</button></div>`;
     h += `<p class="note">${d.demo ? "第一次下载全市场约 5500 只，大约要 1 小时" : "「更新到最新」只补最近的交易日，收盘后通常 1～2 分钟完成"}。可以关掉这个面板，下载会在后台继续。</p>`;
+    }
   }
   $("#dsync").innerHTML = h;
   {
-    $("#dupdate").onclick = () => startSync("update");
-    $("#dfull").onclick = () => { if (confirm(`重新下载全部股票最近 ${ds.years} 年的日线？大约需要 1 小时。`)) startSync("full"); };
-    $("#dyears").onchange = (e) => { ds.years = +e.target.value; };
+    $("#dupdate").onclick = () => { if (STATIC) XG_STATIC.persist(); startSync("update"); };
+    $("#dfull")?.addEventListener("click", () => { if (confirm(`重新下载全部股票最近 ${ds.years} 年的日线？大约需要 1 小时。`)) startSync("full"); });
+    $("#dyears")?.addEventListener("change", (e) => { ds.years = +e.target.value; });
+    $("#dclear")?.addEventListener("click", () => { if (confirm("清除这个浏览器里保存的行情数据？之后需要重新下载。")) startSync("clear"); });
     $("#dretry")?.addEventListener("click", () => startSync("retry_failed"));
   }
 }
