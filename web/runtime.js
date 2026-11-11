@@ -61,6 +61,26 @@
   }
   const py = (fn, ...args) => call("call", [fn, ...args]);
 
+  // ---------------------------------------------------------------- 检查更新（只看 manifest，不下载）
+  // state: idle | checking | latest | available | none（本机还没数据） | error
+  const check = { state: "idle" };
+  async function runCheck() {
+    if (check.state === "checking" || sync.state === "running") return;
+    Object.assign(check, { state: "checking", at: now() });
+    try {
+      const r = await realFetch("data/manifest.json?t=" + Date.now(), { cache: "no-store" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const m = await r.json();
+      index.remote = { last_date: m.last_date, generated_at: m.generated_at, total_size: m.total_size }; saveIndex(index);
+      const need = m.files.filter((f) => index.files[f.name] !== f.sha256);
+      const bytes = need.reduce((a, f) => a + f.size, 0);
+      Object.assign(check, { state: !complete() ? "none" : need.length ? "available" : "latest", last_date: m.last_date,
+                             mb: +(bytes / 1e6).toFixed(1), bytes, total_mb: +(m.total_size / 1e6).toFixed(1), message: "" });
+    } catch (e) {
+      Object.assign(check, { state: "error", message: e.message });
+    }
+  }
+
   // ---------------------------------------------------------------- 下载数据
   const sync = { state: "idle" };
   let abort = null;
@@ -79,9 +99,10 @@
 
   async function runSync(mode, signal) {
     if (mode === "clear") {
-      await XGStore.clear(); index = { files: {} }; saveIndex(index);
+      await XGStore.clear(); index = { files: {}, remote: index.remote }; saveIndex(index);
       if (worker) { worker.terminate(); worker = null; }
-      Object.assign(sync, { state: "done", message: "本地数据已清除", finished_at: now() });
+      Object.assign(sync, { state: "idle", message: "本地数据已清除", finished_at: now() });
+      Object.assign(check, { state: "none", mb: index.remote?.total_size ? +(index.remote.total_size / 1e6).toFixed(1) : 0 });
       return;
     }
     if (mode === "full") { await XGStore.clear(); index.files = {}; saveIndex(index); }
@@ -113,8 +134,9 @@
     index.manifest = m; saveIndex(index);
     Object.assign(sync, { phase: "merge", phase_label: "载入数据" });
     if (worker) { dataLoaded = call("loadData", [m]); await dataLoaded; }
-    Object.assign(sync, { state: "done", finished_at: now(),
+    Object.assign(sync, { state: "done", finished_at: now(), done_at: Date.now(), updated_to: m.last_date,
       message: need.length ? `已更新到 ${m.last_date} · 下载 ${(total / 1e6).toFixed(1)} MB` : `已是最新（${m.last_date}）` });
+    Object.assign(check, { state: "latest", last_date: m.last_date, mb: 0, total_mb: +(m.total_size / 1e6).toFixed(1), message: "" });
   }
 
   function dataStatus() {
@@ -312,7 +334,8 @@
       if (!body.refine && !(body.query || "").trim()) return json({ detail: "请输入筛选规则" }, 400);
       return streamResponse(body, ai);
     }
-    if (path === "/api/data/status") return json({ data: dataStatus(), sync: { ...sync } });
+    if (path === "/api/data/status") return json({ data: dataStatus(), sync: { ...sync }, check: { ...check } });
+    if (path === "/api/data/check" && method === "POST") { runCheck(); return json({ ok: true }); }
     if (path === "/api/data/sync" && method === "POST") { await startSync(body.mode === "full" || body.mode === "clear" ? body.mode : "update"); return json({ ok: true }); }
     if (path === "/api/data/cancel" && method === "POST") { if (sync.state !== "running") return json({ detail: "当前没有进行中的下载" }, 409); abort?.abort(); return json({ ok: true }); }
     if (path === "/api/ai/test" && method === "POST") {
