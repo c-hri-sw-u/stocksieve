@@ -53,16 +53,49 @@ jobs:
           if [ "${{ inputs.full }}" = "true" ] || [ ! -f data/cn_a/daily.parquet ]; then echo "mode=full" >> "$GITHUB_OUTPUT"; else echo "mode=incremental" >> "$GITHUB_OUTPUT"; fi
       - name: 增量更新（只补最新交易日）
         if: steps.mode.outputs.mode == 'incremental'
-        run: python -u -m app.sync --incremental --workers 6 2>&1 | tr '\r' '\n' | grep -v -E '^\s*$|it/s|s/it'
-      - name: 全量：先取股票列表和行业分类
+        run: python -u -m app.sync --incremental --workers 6 --no-industry 2>&1 | tr '\r' '\n' | grep -v -E '^\s*$|it/s|s/it'
+      - name: 全量：先取股票列表（行业分类在另一个并行任务里）
         if: steps.mode.outputs.mode == 'full'
-        run: python -u -m app.sync --list-only --industry 2>&1 | tr '\r' '\n' | grep -v -E '^\s*$|it/s|s/it'
+        run: python -u -m app.sync --list-only --no-industry 2>&1 | tr '\r' '\n' | grep -v -E '^\s*$|it/s|s/it'
       - uses: actions/upload-artifact@v4
         with:
           name: state
           path: |
             data/cn_a/*.parquet
             data/cn_a/*.json
+          retention-days: 3
+
+  # 行业分类：单独并行跑、限时；失败也不影响整条流水线（沿用上次的或留空）
+  industry:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    env:
+      XG_SW_BUDGET: "600"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with: { name: state, path: data/cn_a }
+      - name: 行业分类（申万优先，7 天内有缓存就不重新下载）
+        run: |
+          touch data/cn_a/spot_cache.parquet
+          if python -c "import pandas as pd,datetime as dt,sys;i=pd.read_parquet('data/cn_a/industry.parquet');sys.exit(0 if (dt.datetime.now()-pd.to_datetime(i['fetched_at'].iloc[0])).days<7 else 1)" 2>/dev/null; then
+            echo "行业分类 7 天内更新过，沿用"
+          else
+            timeout 780 python -u -m app.sync --industry-only 2>&1 | tr '\r' '\n' | grep -v -E '^\s*$|it/s|s/it' | tail -15 || echo "行业分类超时或失败，沿用上次的"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: industry
+          path: |
+            data/cn_a/industry.parquet
+            data/cn_a/industry_sw_partial.json
+            data/cn_a/sw_levels.json
+          if-no-files-found: ignore
           retention-days: 3
 
   download:
@@ -121,7 +154,7 @@ jobs:
           retention-days: 3
 
   publish:
-    needs: [prepare, merge]
+    needs: [prepare, merge, industry]
     if: always() && needs.prepare.result == 'success' && (needs.merge.result == 'success' || needs.merge.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -132,11 +165,16 @@ jobs:
       - run: pip install -r requirements.txt
       - uses: actions/download-artifact@v4
         with: { name: "${{ needs.prepare.outputs.mode == 'full' && 'state-merged' || 'state' }}", path: data/cn_a }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true   # 行业分类失败时没有这个产物
+        with: { name: industry, path: data/cn_a }
+      - name: 应用行业分类
+        run: python -u -m app.sync --apply-industry
       - name: 数据存回 Release「data-latest」
         run: |
           cat data/cn_a/meta.json
           gh release view data-latest >/dev/null 2>&1 || gh release create data-latest --title "数据（自动更新）" --notes "StockSieve 的行情数据，由 GitHub Actions 每个交易日自动更新。网页从 GitHub Pages 读取导出后的版本。" --latest=false
-          gh release upload data-latest data/cn_a/daily.parquet data/cn_a/stocks.parquet data/cn_a/meta.json $(ls data/cn_a/industry.parquet data/cn_a/spot_cache.parquet data/cn_a/sw_levels.json 2>/dev/null) --clobber
+          gh release upload data-latest data/cn_a/daily.parquet data/cn_a/stocks.parquet data/cn_a/meta.json $(ls data/cn_a/industry.parquet data/cn_a/spot_cache.parquet data/cn_a/sw_levels.json data/cn_a/industry_sw_partial.json 2>/dev/null) --clobber
       - name: 生成静态网站
         run: |
           python scripts/build_web.py --no-data

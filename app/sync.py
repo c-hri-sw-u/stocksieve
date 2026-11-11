@@ -282,6 +282,7 @@ def main() -> None:
     ap.add_argument("--chunk", default="", help="只下载第 i 组（共 N 组），格式 i/N，不合并；给并行下载用")
     ap.add_argument("--merge-only", action="store_true", help="不下载，只把 hist/ 里已有的文件合并成 daily.parquet")
     ap.add_argument("--list-only", action="store_true", help="只获取股票列表和行业分类（给并行下载做准备）")
+    ap.add_argument("--apply-industry", action="store_true", help="不联网，把已有的 industry.parquet 写进股票表")
     ap.add_argument("--no-industry", action="store_true", help="不下载行业分类（有缓存就用缓存）")
     args = ap.parse_args()
 
@@ -292,6 +293,9 @@ def main() -> None:
     cancel_flag.unlink(missing_ok=True)
     last_failed = load_status().get("failed", []) if args.only_failed else []
 
+    if args.apply_industry:
+        apply_industry_cache(out)
+        return
     incremental = args.incremental and (out / "daily.parquet").exists()
     mode = ("industry" if args.industry_only else "incremental" if incremental else "full" if args.full
             else "retry" if args.only_failed else "update")
@@ -668,7 +672,8 @@ def _with_budget(items, fn, workers, budget, progress=None):
     return out
 
 
-def industry_sw(ak, progress=None, budget=3600, out: Path | None = None) -> pd.DataFrame:
+def industry_sw(ak, progress=None, budget=None, out: Path | None = None) -> pd.DataFrame:
+    budget = budget or float(os.environ.get("XG_SW_BUDGET", 3600))  # 在 GitHub Actions 上限时，避免拖住整条流水线
     """申万行业（数据来自乐咕乐股）：按 336 个三级行业取成分股，再映射到一级、二级。"""
     def slow_retry(fn, tries=5):
         # 乐咕乐股频繁请求时会返回空页面（解析报 'NoneType' ... find_all），隔久一点再试
@@ -828,9 +833,30 @@ def apply_industry(stocks: pd.DataFrame, ind: pd.DataFrame | None) -> pd.DataFra
     return stocks
 
 
+def apply_industry_cache(out: Path) -> None:
+    """不联网：把 industry.parquet（如果有）写进 stocks.parquet 和 meta.json。"""
+    ind = load_industry(out)
+    if ind is None or ind.empty or not (out / "stocks.parquet").exists():
+        print("没有行业分类缓存，跳过")
+        return
+    st = apply_industry(pd.read_parquet(out / "stocks.parquet"), ind)[STOCK_COLUMNS]
+    write_atomic(out / "stocks.parquet", lambda t: st.to_parquet(t, index=False))
+    meta = load_meta(out)
+    meta["industry_source"] = ind["source"].iloc[0]
+    write_json(out / "meta.json", meta)
+    print(f"已应用行业分类：{meta['industry_source']}，覆盖 {(st['industry'] != '').sum()}/{len(st)}")
+
+
 def run_industry_only(out: Path, status: "Status") -> None:
     import akshare as ak
 
+    if not (out / "stocks.parquet").exists():  # 全量下载还没合并时：只按股票列表拿行业分类，存成 industry.parquet
+        codes = pd.read_parquet(out / "spot_cache.parquet")["code"].astype(str).str.zfill(6).tolist()
+        ind = ensure_industry(ak, out, codes, status, force=True)
+        n = 0 if ind is None else ind["code"].isin(set(codes)).sum()
+        status.update(state="done", finished_at=_now(), message=f"行业分类完成 · 覆盖 {n}/{len(codes)} 只")
+        print(f"行业分类：覆盖 {n}/{len(codes)}")
+        return
     st = pd.read_parquet(out / "stocks.parquet")
     ind = ensure_industry(ak, out, st["code"].tolist(), status, force=True)
     st = apply_industry(st, ind)[STOCK_COLUMNS]
