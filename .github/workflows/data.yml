@@ -186,7 +186,9 @@ jobs:
 
   deploy:
     needs: publish
-    if: github.ref == 'refs/heads/main'   # GitHub Pages 只允许从默认分支发布
+    # GitHub Pages 只允许从默认分支发布。要写 always()：增量更新时全量下载那几步被跳过，
+    # 不写的话「跳过」会一路传下来，让发布也被跳过
+    if: always() && needs.publish.result == 'success' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
