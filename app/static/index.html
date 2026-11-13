@@ -185,6 +185,21 @@
   @media (hover: none) { .cpt::after { opacity: .35; } }
   :root { --ic-copy: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linejoin='round'%3E%3Crect x='9' y='9' width='12' height='12' rx='2'/%3E%3Cpath d='M5 15V5a2 2 0 0 1 2-2h8'/%3E%3C/svg%3E");
           --ic-ok: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E"); }
+  /* 名称格：在看盘软件打开（↗ 和菜单箭头浮在格子右侧，不占位；鼠标移到这一行才显示） */
+  th.nm, td.nm { padding-right: 62px; }
+  .opn, .opm { position: absolute; top: 50%; transform: translateY(-50%); border: none; background: none; padding: 3px; border-radius: 5px; color: var(--muted); opacity: 0; display: grid; place-items: center; }
+  .opn { left: calc(100% + 21px); } .opm { left: calc(100% + 39px); padding: 3px 2px; }
+  tr:hover .opn, tr:hover .opm, .opn:focus-visible, .opm:focus-visible { opacity: 1; }
+  .opn:hover, .opm:hover { color: var(--text); background: var(--hover); }
+  @media (hover: none) { .opn, .opm { opacity: .5; } }
+  .openmenu { position: fixed; z-index: 40; min-width: 160px; background: var(--bg); border: 1px solid var(--box); border-radius: 10px; box-shadow: 0 10px 28px rgba(0,0,0,.14); padding: 4px; display: none; }
+  [data-theme="dark"] .openmenu { box-shadow: 0 10px 28px rgba(0,0,0,.6); }
+  .openmenu.on { display: block; }
+  .openmenu .omh { font-size: 12px; color: var(--muted); padding: 6px 10px 4px; }
+  .openmenu button { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; border: none; background: none; padding: 7px 10px; border-radius: 7px; font-size: 14px; }
+  .openmenu button:hover, .openmenu button:focus-visible { background: var(--hover); outline: none; }
+  .openmenu .ck { width: 14px; color: var(--text); }
+
   /* 立即出现的小气泡（不用原生 title，它要等一会才出来） */
   .tip { position: fixed; z-index: 40; transform: translate(-50%, -100%); background: var(--text); color: var(--bg); font-size: 12px; padding: 3px 8px; border-radius: 6px; pointer-events: none; white-space: nowrap; display: none; }
   .tip.on { display: block; }
@@ -573,6 +588,8 @@ async function run(opts = {}) {
 
 // 结果摘要行的图标（窄屏只显示图标）
 const IC = {
+  ext: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M9 7h8v8"/></svg>`,
+  caret: `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>`,
   star: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg>`,
   starOn: `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg>`,
   rule: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5"/></svg>`,
@@ -862,6 +879,36 @@ function deleteSaved(id) {
 }
 
 const tipText = () => "点击复制";
+
+// ---- 在看盘软件的网页版打开个股：同花顺、东方财富、雪球（默认同花顺，菜单里选过的记为默认）
+const mkt = (c) => (/^(4|8|92)/.test(c) ? "bj" : /^[69]/.test(c) ? "sh" : "sz");
+const OPEN = {
+  ths: { name: "同花顺", url: (c) => `https://stockpage.10jqka.com.cn/${c}/` },
+  em: { name: "东方财富", url: (c) => (mkt(c) === "bj" ? `https://quote.eastmoney.com/bj/${c}.html` : `https://quote.eastmoney.com/${mkt(c)}${c}.html`) },
+  xq: { name: "雪球", url: (c) => `https://xueqiu.com/S/${mkt(c).toUpperCase()}${c}` },
+};
+const OPEN_KEY = "xg.open.v1";
+function openDefault() { try { const v = localStorage.getItem(OPEN_KEY); return OPEN[v] ? v : "ths"; } catch (e) { return "ths"; } }
+function openStock(code, key) { window.open(OPEN[key].url(code), "_blank", "noopener"); }
+function showOpenMenu(btn) {
+  let m = $("#openmenu");
+  if (!m) { m = document.createElement("div"); m.id = "openmenu"; m.className = "openmenu"; m.setAttribute("role", "menu"); document.body.append(m); }
+  const d = openDefault(), code = btn.dataset.code;
+  m.innerHTML = `<div class="omh">在以下网站打开 ${esc(code)}</div>` + Object.entries(OPEN).map(([k, p]) =>
+    `<button role="menuitemradio" aria-checked="${k === d}" data-k="${k}"><span class="ck">${k === d ? "✓" : ""}</span>${p.name}</button>`).join("");
+  m.querySelectorAll("button").forEach((b) => b.onclick = () => {
+    try { localStorage.setItem(OPEN_KEY, b.dataset.k); } catch (e) {}
+    openStock(code, b.dataset.k); closeOpenMenu(); drawTable();
+  });
+  const r = btn.getBoundingClientRect();
+  m.style.left = Math.min(r.left, innerWidth - 180) + "px"; m.style.top = r.bottom + 6 + "px";
+  m.classList.add("on"); hideTip();
+  m.querySelector("button")?.focus();
+}
+function closeOpenMenu() { $("#openmenu")?.classList.remove("on"); }
+document.addEventListener("click", (e) => { if (!e.target.closest("#openmenu, .opm")) closeOpenMenu(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#openmenu")?.classList.contains("on")) { e.stopImmediatePropagation(); closeOpenMenu(); } }, true);
+document.addEventListener("scroll", closeOpenMenu, true);
 function showTip(td, text) {
   let t = $("#tip");
   if (!t) { t = document.createElement("div"); t.id = "tip"; t.className = "tip"; document.body.append(t); }
@@ -1073,7 +1120,7 @@ function drawTable() {
     const aria = s > 0 ? "ascending" : s < 0 ? "descending" : "none";
     const icon = s > 0 ? "↑" : s < 0 ? "↓" : "↕";
     const x = c.kind === "fixed" ? "" : `<button class="hide" data-k="${esc(c.key)}" aria-label="隐藏${esc(c.label)}列" title="隐藏这一列"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>`;
-    h += `<th class="${numCol[i] ? "num" : ""}${fx(c)}${x ? " cx" : ""}" aria-sort="${aria}"><span class="thx"><button class="sb" data-i="${i}" title="按${esc(c.label)}排序">${esc(c.label)}<i aria-hidden="true">${icon}</i></button>${x}</span></th>`;
+    h += `<th class="${numCol[i] ? "num" : ""}${fx(c)}${x ? " cx" : ""}${c.key === "name" ? " nm" : ""}" aria-sort="${aria}"><span class="thx"><button class="sb" data-i="${i}" title="按${esc(c.label)}排序">${esc(c.label)}<i aria-hidden="true">${icon}</i></button>${x}</span></th>`;
   }
   h += `<th class="addcol"><button class="addbtn" id="addColBtn" aria-haspopup="dialog" aria-controls="colpop" aria-expanded="false" aria-label="添加或隐藏列" title="添加列"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button></th>`;
   h += "</tr></thead><tbody>";
@@ -1088,7 +1135,8 @@ function drawTable() {
         txt = Math.abs(v) >= 1000 ? v.toLocaleString("zh-CN", { maximumFractionDigits: 0 }) : String(+v.toFixed(2));
         if (signed[i] && v) cls += v > 0 ? " up" : " down";
       }
-      h += `<td class="${cls}">${cls.includes(" cp") ? `<span class="cpt">${esc(txt ?? "")}</span>` : esc(txt === "" || txt == null ? "—" : txt)}</td>`;
+      const open = c.key === "name" ? `<button class="opn" data-code="${esc(r[0])}" aria-label="在${OPEN[openDefault()].name}打开${esc(txt ?? "")}">${IC.ext}</button><button class="opm" data-code="${esc(r[0])}" aria-label="选择打开方式" aria-haspopup="menu">${IC.caret}</button>` : "";
+      h += `<td class="${cls}${c.key === "name" ? " nm" : ""}">${cls.includes(" cp") ? `<span class="cpt">${esc(txt ?? "")}${open}</span>` : esc(txt === "" || txt == null ? "—" : txt)}</td>`;
     }
     h += `<td class="addcol"></td></tr>`;
   }
@@ -1098,16 +1146,28 @@ function drawTable() {
   const th1 = $("#tbl th.fx"); if (th1) $("#tbl table").style.setProperty("--c1w", th1.offsetWidth + "px");
   $("#more")?.addEventListener("click", () => { state.showAll = true; drawTable(); });
   $("#tbl tbody").onclick = (e) => {
+    const ob = e.target.closest(".opn, .opm");
+    if (ob) {
+      e.stopPropagation();
+      if (ob.classList.contains("opn")) openStock(ob.dataset.code, openDefault());
+      else showOpenMenu(ob);
+      return;
+    }
     const td = e.target.closest("td.cp"); if (!td) return;
     if (String(window.getSelection?.() || "").trim()) return;  // 用户在拖选文字，不复制
-    const text = td.textContent.trim();
     const span = td.querySelector(".cpt");
+    const text = span.textContent.trim();
     copyText(text, () => {
       span?.classList.add("ok"); showTip(td, `已复制 ${text}`);
       setTimeout(() => { span?.classList.remove("ok"); if (td.matches(":hover")) showTip(td, tipText(td)); else hideTip(); }, 1200);
     });
   };
-  $("#tbl tbody").onmouseover = (e) => { const td = e.target.closest("td.cp"); if (td && !td.contains(e.relatedTarget)) showTip(td, tipText(td)); };
+  $("#tbl tbody").onmouseover = (e) => {
+    const ob = e.target.closest(".opn, .opm");
+    if (ob) { showTip(ob, ob.classList.contains("opn") ? `在${OPEN[openDefault()].name}打开` : "选择打开方式"); return; }
+    const td = e.target.closest("td.cp");
+    if (td && (!td.contains(e.relatedTarget) || e.relatedTarget?.closest?.(".opn, .opm"))) showTip(td, tipText(td));
+  };
   $("#tbl tbody").onmouseout = (e) => { const td = e.target.closest("td.cp"); if (td && !td.contains(e.relatedTarget)) hideTip(); };
 
   $("#tbl").querySelectorAll(".hide").forEach((b) => b.onclick = (e) => {
