@@ -30,6 +30,7 @@ def main() -> None:
     ap.add_argument("--no-data", action="store_true", help="不导出数据（数据由别的步骤放进 site/data）")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--years", type=float, default=0)
+    ap.add_argument("--history", default="", help="更早历史所在的目录（export_history.py 的输出），一起放进网站")
     ap.add_argument("--no-pyodide", action="store_true", help="不把 Pyodide 放进网站（只用 CDN）")
     args = ap.parse_args()
     out = Path(args.out)
@@ -67,6 +68,8 @@ def main() -> None:
             cmd += ["--limit", str(args.limit)]
         if args.years:
             cmd += ["--years", str(args.years)]
+        if args.history:
+            cmd += ["--history", args.history]
         subprocess.run(cmd, check=True)
     print(f"已生成 {out}")
 

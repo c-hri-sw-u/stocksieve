@@ -1,0 +1,109 @@
+# 一次性准备更早的历史日线（比如 2015 年起），给网页「数据 → 时间范围」往前补全用。
+#
+# 更早的历史不会再变，只需要跑一次（想改起始年份时再跑）：
+# 按现有数据的股票列表，分 6 组并行下载「起始日 ~ 现有数据第一天之后几周」的前复权日线，
+# 按年打包后存到 Release「data-history」。之后每天的 data 流程发布网站时会把它一起放上去。
+# 跑完后再手动运行一次 data 流程（不用勾「全部重新下载」），网站上就能补全了。
+name: history
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: "历史从哪天开始"
+        default: "2015-01-01"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: history
+  cancel-in-progress: false
+
+env:
+  XG_PREFER_EM: "1"
+  GH_TOKEN: ${{ github.token }}
+  OVERLAP_DAYS: "28"   # 比现有数据的第一天多下载 4 周，浏览器靠重叠的几天把两段价格对齐
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      base_from: ${{ steps.range.outputs.base_from }}
+      end: ${{ steps.range.outputs.end }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: 取现有数据的股票列表和起始日
+        run: |
+          mkdir -p data/cn_a
+          gh release download data-latest -D data/cn_a --pattern meta.json --pattern spot_cache.parquet --pattern stocks.parquet --clobber
+      - id: range
+        run: |
+          python - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+          from datetime import date, timedelta
+          m = json.load(open("data/cn_a/meta.json"))
+          base = date.fromisoformat(m["first_date"])
+          print(f"base_from={base}")
+          print(f"end={base + timedelta(days=int(os.environ['OVERLAP_DAYS']))}")
+          EOF
+          cat "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: list
+          path: data/cn_a
+          retention-days: 1
+
+  download:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with: { name: list, path: data/cn_a }
+      - name: 下载第 ${{ matrix.part }} 组（${{ inputs.from }} ~ ${{ needs.prepare.outputs.end }}）
+        run: |
+          touch data/cn_a/spot_cache.parquet   # 用现有数据的同一份股票列表
+          python -u -m app.sync --full --chunk ${{ matrix.part }}/6 --start ${{ inputs.from }} --end ${{ needs.prepare.outputs.end }} --workers 6 --no-industry 2>&1 | tr '\r' '\n' | grep -v -E '^\s*$|it/s|s/it' | tail -20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hist-${{ matrix.part }}
+          path: |
+            data/cn_a/hist
+            data/cn_a/failed_*.json
+          retention-days: 1
+
+  publish:
+    needs: [prepare, download]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with: { pattern: "hist-*", path: data/cn_a, merge-multiple: true }
+      - name: 按年打包
+        run: |
+          echo "下载到 $(ls data/cn_a/hist | wc -l) 只；失败：$(cat data/cn_a/failed_*.json 2>/dev/null | tr -d '\n')"
+          python scripts/export_history.py --hist data/cn_a/hist --from ${{ inputs.from }} --base-from ${{ needs.prepare.outputs.base_from }} --out data/history
+          ls -la data/history
+      - name: 存到 Release「data-history」
+        run: |
+          gh release view data-history >/dev/null 2>&1 || gh release create data-history --title "更早的历史数据" --notes "StockSieve 网页「时间范围」往前补全用的历史日线（前复权），按年打包，由 history 流程一次性生成。" --latest=false
+          # 先删掉旧的文件（起始年份改了的话，旧的年份文件不能留着）
+          for a in $(gh api repos/${{ github.repository }}/releases/tags/data-history --jq '.assets[].id'); do gh api -X DELETE repos/${{ github.repository }}/releases/assets/$a; done
+          gh release upload data-history data/history/* --clobber

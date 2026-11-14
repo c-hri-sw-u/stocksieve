@@ -55,12 +55,27 @@ const handlers = {
     py.FS.mkdirTree(dir);
     for (const n of py.FS.readdir(dir)) if (n !== "." && n !== "..") py.FS.unlink(dir + "/" + n);
     for (const f of manifest.files) {
+      if (f.kind === "history") continue;  // 更早的历史用到时才载入（addHistory）
       const buf = await XGStore.get(f.name);
       if (buf) py.FS.writeFile(dir + "/" + f.name, new Uint8Array(buf));
     }
     const r = JSON.parse(X.load_files(JSON.stringify(manifest), dir));
     for (const n of py.FS.readdir(dir)) if (n !== "." && n !== "..") py.FS.unlink(dir + "/" + n);  // 已经在内存里了，删掉省空间
     return r;
+  },
+  // 把更早的历史（几个年份文件）接到已载入的数据前面
+  async addHistory(names) {
+    const dir = "/xghist";
+    py.FS.mkdirTree(dir);
+    try {
+      for (const n of names) {
+        const buf = await XGStore.get(n);
+        if (buf) py.FS.writeFile(dir + "/" + n, new Uint8Array(buf));
+      }
+      return JSON.parse(X.add_history(JSON.stringify(names), dir));
+    } finally {
+      for (const n of py.FS.readdir(dir)) if (n !== "." && n !== "..") py.FS.unlink(dir + "/" + n);
+    }
   },
   run(market, start, end, code) { return JSON.parse(X.run(market, start, end, code)); },
   // 调 xg_web 里的其他函数（提示词、解析模型输出等）
