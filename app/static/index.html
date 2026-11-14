@@ -365,6 +365,14 @@
   .libbtn { border: none; background: transparent; color: var(--muted); width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; margin-left: auto; flex: none; }
   .libbtn:hover, .libbtn[aria-expanded="true"] { background: var(--hover); color: var(--text); }
   .libbtn + .go { margin-left: 6px; }
+  .codebtn + .libbtn { margin-left: 2px; }
+  .pastebox { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+  .pastebox .ph { font-size: 13px; color: var(--muted); }
+  .pastebox textarea { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px solid var(--line); border-radius: 8px; padding: 10px; min-height: 200px; resize: vertical; background: var(--bg); color: var(--text); }
+  .pastebox .row2 { display: flex; align-items: center; gap: 10px; }
+  .pastebox .row2 .err2 { color: var(--down, #c0392b); font-size: 13px; flex: 1; }
+  .pastebox .row2 .primary { width: auto; padding: 0 22px; }
+  .rule .codeacts { display: flex; gap: 8px; flex-wrap: wrap; }
   .pop { position: absolute; left: -1px; right: -1px; top: calc(100% + 8px); z-index: 5; background: var(--bg); border: 1px solid var(--box); border-radius: 14px; box-shadow: 0 12px 32px rgba(0,0,0,.12); display: none; overflow: hidden; }
   [data-theme="dark"] .pop { box-shadow: 0 12px 32px rgba(0,0,0,.6); }
   .pop.open { display: block; }
@@ -431,10 +439,18 @@
         <option value="custom">自定义</option>
       </select></span>
       <span class="dates" id="dates"><input type="date" id="start" aria-label="开始日期">–<input type="date" id="end" aria-label="结束日期"></span>
+      <button class="libbtn codebtn" id="codeBtn" aria-haspopup="dialog" aria-controls="pastepop" aria-expanded="false" aria-label="粘贴规则代码" title="粘贴规则代码直接运行"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5"/></svg></button>
       <button class="libbtn" id="libBtn" aria-haspopup="listbox" aria-controls="libpop" aria-expanded="false" aria-label="规则库" title="规则库：示例和收藏（⌘K）"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></button>
       <button class="go" id="run" aria-label="开始筛选" title="开始筛选（⌘/Ctrl + Enter）">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
       </button>
+    </div>
+  <div class="pop" id="pastepop" role="dialog" aria-label="粘贴规则代码">
+      <div class="pastebox">
+        <label class="ph" for="pasteCode">粘贴规则代码（def screen(daily, stocks, start, end): …），用上面选的市场和时间范围运行，不需要 AI</label>
+        <textarea id="pasteCode" spellcheck="false" placeholder="def screen(daily, stocks, start, end):&#10;    ..."></textarea>
+        <div class="row2"><span class="err2" id="pasteErr" role="status"></span><button class="secondary" id="pasteCancel">取消</button><button class="primary" id="pasteRun">运行</button></div>
+      </div>
     </div>
   <div class="pop" id="libpop" role="dialog" aria-label="规则库">
       <div class="pophead" role="tablist">
@@ -679,7 +695,7 @@ function render(j) {
   if (j.reasoning) h += `<details class="think"><summary>查看 AI 的思考过程</summary><div class="tx">${esc(j.reasoning)}</div></details>`;
   if (j.assumptions?.length) h += `<ul>${j.assumptions.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>`;
   if (fail) h += `<p class="err" style="padding:0 0 10px">${esc(j.error)}</p>`;
-  if (j.code) h += `<textarea id="code" spellcheck="false">${esc(j.code)}</textarea><button class="link" id="rerun">运行修改后的代码</button>`;
+  if (j.code) h += `<textarea id="code" spellcheck="false">${esc(j.code)}</textarea><div class="codeacts"><button class="link" id="rerun">运行修改后的代码</button><button class="link" id="copycode">复制代码</button></div>`;
   h += `</div>`;
   if (!fail) h += `<div class="tw" id="tbl"></div>`;
   $("#result").innerHTML = h;
@@ -689,6 +705,10 @@ function render(j) {
     e.currentTarget.setAttribute("aria-expanded", on);
   };
   if (j.code) $("#rerun").onclick = () => run({ code: $("#code").value });
+  if (j.code) $("#copycode").onclick = (e) => {
+    const b = e.currentTarget;
+    copyText($("#code").value, () => { b.textContent = "已复制"; setTimeout(() => { b.textContent = "复制代码"; }, 1500); });
+  };
   if (j.code) $("#refine").onsubmit = (e) => { e.preventDefault(); refineRun($("#refineq").value.trim()); };
   drawVersions();
   if (!fail) {
@@ -1013,10 +1033,43 @@ function runSaved(s) {
   else run({ title: s.name });
 }
 
+// ---------------------------------------------------------------- 粘贴规则代码
+const pasteOpen = () => $("#pastepop").classList.contains("open");
+function openPaste() {
+  closeLib();
+  $("#pasteErr").textContent = "";
+  $("#pastepop").classList.add("open");
+  $("#codeBtn").setAttribute("aria-expanded", "true");
+  $("#pasteCode").focus();
+}
+function closePaste() {
+  $("#pastepop").classList.remove("open");
+  $("#codeBtn").setAttribute("aria-expanded", "false");
+}
+$("#codeBtn").onclick = (e) => { e.stopPropagation(); pasteOpen() ? closePaste() : openPaste(); };
+$("#pasteCancel").onclick = () => closePaste();
+$("#pasteRun").onclick = () => {
+  const code = $("#pasteCode").value.trim();
+  if (!/def\s+screen\s*\(/.test(code)) { $("#pasteErr").textContent = "代码里要有 def screen(daily, stocks, start, end):"; $("#pasteCode").focus(); return; }
+  closePaste();
+  state.exampleId = null;
+  run({ code });
+};
+$("#pasteCode").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#pasteRun").click(); }
+  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePaste(); $("#codeBtn").focus(); }
+  if (e.key === "Tab" && !e.shiftKey && !e.altKey) {  // 代码里用 Tab 缩进 4 个空格
+    e.preventDefault(); const t = e.target, a = t.selectionStart;
+    t.setRangeText("    ", a, t.selectionEnd, "end");
+  }
+});
+document.addEventListener("click", (e) => { if (pasteOpen() && !e.target.closest("#pastepop") && !e.target.closest("#codeBtn")) closePaste(); });
+
 // ---------------------------------------------------------------- 规则库弹层
 let libTab = "saved", libItems = [], libActive = 0;
 const libOpen = () => $("#libpop").classList.contains("open");
 function openLib(tab) {
+  if (typeof closePaste === "function") closePaste();
   libTab = tab || (loadSaved().length ? "saved" : "examples");
   $("#libq").value = "";
   $("#libpop").classList.add("open");
