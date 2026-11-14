@@ -89,27 +89,41 @@
   async function ensureData() {
     if (!worker) startWorker();
     if (!dataLoaded) {
-      dataLoaded = complete() ? loadBase(index.manifest) : Promise.resolve({ ok: false });
+      dataLoaded = complete() ? withStage("载入行情数据", "", () => loadBase(index.manifest)) : Promise.resolve({ ok: false });
       dataLoaded.catch(() => { dataLoaded = null; });
     }
     return dataLoaded;
   }
   const py = (fn, ...args) => call("call", [fn, ...args]);
+  // 页面上显示「现在在做什么」：engine.stage 是 Python 环境自己的加载进度（优先显示），
+  // engine.task 是之后的步骤 { stage, hint }，hint 是括号里的说明（空的话页面显示「只有第一次需要」）
+  async function withStage(stage, hint, fn) {
+    const task = { stage, hint };
+    engine.task = task;
+    try { return await fn(); }
+    finally { if (engine.task === task) engine.task = null; }
+  }
   function loadBase(m) { histLoaded = new Set(); return call("loadData", [m]); }
 
   // 筛选的开始日期（再往前约 400 天预热）早于现有数据时，把需要的那几年历史接上。
   // 只在用到时才载入：十几年的数据全放进浏览器内存太大
   const LOOKBACK_DAYS = 400;  // 和 app/prompts.py 的 LOOKBACK_DAYS 一致
-  async function ensureHistory(start) {
+  async function ensureHistory(start, emit) {
     const m = index.manifest;
-    if (!m || !start || !index.histFrom) return;
+    if (!m || !start || !index.histFrom) return false;
     const need = new Date(Date.parse(start) - (LOOKBACK_DAYS + 7) * 86400000).toISOString().slice(0, 10);
-    if (need >= m.first_date) return;
+    if (need >= m.first_date) return false;
     const todo = usableHist(m).filter((f) => f.to >= need && !histLoaded.has(f.name));
-    if (!todo.length) return;
-    const r = await call("addHistory", [todo.map((f) => f.name)], 180000);
+    if (!todo.length) return true;
+    const years = todo.map((f) => +f.from.slice(0, 4));
+    const lo = Math.min(...years), hi = Math.max(...years);
+    const stage = `正在载入${lo === hi ? ` ${lo} 年` : ` ${lo}–${hi} 年`}的历史数据`;
+    const hint = todo.length > 2 ? "第一次需要 1～2 分钟，之后不用再等" : "只有第一次需要";
+    emit?.({ type: "status", stage: "history", text: `${stage}（${hint}）` });
+    const r = await withStage(stage, hint, () => call("addHistory", [todo.map((f) => f.name)], 180000));
     if (r && r.ok === false) throw new Error(r.error);
     todo.forEach((f) => histLoaded.add(f.name));
+    return true;
   }
 
   // ---------------------------------------------------------------- 检查更新（只看 manifest，不下载）
@@ -236,10 +250,15 @@
     const r = await runCode(req.market, req.start, req.end, code);
     return { ...r, code, understanding, assumptions: [], attempts: 1, seconds: +((performance.now() - t0) / 1000).toFixed(1), source };
   }
-  async function runCode(market, start, end, code) {
-    try { await ensureHistory(start); }
+  async function runCode(market, start, end, code, emit) {
+    let long = false;
+    try { long = await ensureHistory(start, emit); }
     catch (e) { if (e.kind === "engine" || /计算环境/.test(e.message)) throw e; return { ok: false, error: "载入更早的历史数据失败：" + e.message }; }
-    try { return await call("run", [market, start, end, code], EXEC_TIMEOUT); }
+    if (long) emit?.({ type: "status", stage: "running", text: "运行中（时间范围长，可能要半分钟以上）" });
+    try {
+      const go = () => call("run", [market, start, end, code], EXEC_TIMEOUT);
+      return await (long ? withStage("筛选中", "时间范围长，可能要半分钟以上", go) : go());
+    }
     catch (e) { if (e.kind === "engine" || /计算环境/.test(e.message)) throw e; return { ok: false, error: e.message }; }
   }
 
@@ -342,7 +361,7 @@
       }
       plan = p;
       emit({ type: "status", stage: "running" });
-      result = await runCode(req.market, req.start, req.end, plan.code);
+      result = await runCode(req.market, req.start, req.end, plan.code, emit);
       if (result.ok || i === 2) break;
       messages.push({ role: "assistant", content: raw }, { role: "user", content: await py("fix_message", result.error || "", result.traceback || "") });
     }

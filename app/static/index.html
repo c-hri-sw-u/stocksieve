@@ -609,7 +609,13 @@ async function run(opts = {}) {
   else {
     $("#result").innerHTML = `<div class="loading"><span class="dot"></span><span class="dot"></span><span class="dot"></span><div style="margin-top:10px" id="ldmsg">筛选中</div></div>`;
     if (STATIC) {  // 第一次要先在浏览器里启动 Python，显示当前在做什么
-      const t = setInterval(() => { const m = $("#ldmsg"); if (!m) return clearInterval(t); m.textContent = XG_STATIC.engine.stage ? `${XG_STATIC.engine.stage}（只有第一次需要）` : "筛选中"; }, 300);
+      const t0 = Date.now();
+      const t = setInterval(() => {
+        const m = $("#ldmsg"); if (!m) return clearInterval(t);
+        const en = XG_STATIC.engine, sec = Math.round((Date.now() - t0) / 1000);
+        const st = en.stage ? { stage: en.stage } : en.task;
+        m.textContent = (st ? `${st.stage}（${st.hint || "只有第一次需要"}）` : "筛选中") + (sec >= 3 ? ` · ${sec}s` : "");
+      }, 300);
     }
   }
   try {
@@ -706,7 +712,7 @@ function progressIn(box, first = "思考中") {
   const timer = setInterval(() => { tm.textContent = Math.round((Date.now() - t0) / 1000) + "s"; }, 500);
   return {
     onEvent(e) {
-      if (e.type === "status") sg.textContent = e.stage === "fixing" ? `自动修复第 ${e.attempt} 次` : STAGES[e.stage] || "处理中";
+      if (e.type === "status") sg.textContent = e.stage === "fixing" ? `自动修复第 ${e.attempt} 次` : e.text || STAGES[e.stage] || "处理中";
       if (e.type === "reasoning") {
         det.hidden = false;
         const atBottom = tx.scrollHeight - tx.scrollTop - tx.clientHeight < 24;
