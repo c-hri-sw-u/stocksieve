@@ -103,12 +103,24 @@
     try { return await fn(); }
     finally { if (engine.task === task) engine.task = null; }
   }
-  function loadBase(m) { histLoaded = new Set(); return call("loadData", [m]); }
+  // 浏览器可能清掉了本机缓存的文件，但索引还记着「已下载」：发现缺了就从索引里去掉，页面会提示重新下载
+  function forget(names) {
+    if (!names?.length) return;
+    for (const n of names) delete index.files[n];
+    saveIndex(index);
+  }
+  async function loadBase(m) {
+    histLoaded = new Set();
+    const r = await call("loadData", [m]);
+    forget(r?.missing);
+    return r;
+  }
 
   // 已下载的数据全部交给规则：用户补全过更早的历史，筛选前先把它接上（第一次要等一会，之后一直在内存里）
   async function ensureHistory(start, emit) {
     const m = index.manifest;
     if (!m || !index.histFrom) return false;
+    if (!(await ensureData())?.ok) return false;  // 现有数据都没载入（比如本机缓存被清掉了），就不接历史
     const usable = usableHist(m);
     if (!usable.length) return false;
     const todo = usable.filter((f) => !histLoaded.has(f.name));
@@ -119,7 +131,10 @@
     const hint = todo.length > 2 ? "第一次需要 1～2 分钟，之后不用再等" : "只有第一次需要";
     emit?.({ type: "status", stage: "history", text: `${stage}（${hint}）` });
     const r = await withStage(stage, hint, () => call("addHistory", [todo.map((f) => f.name)], 180000));
-    if (r && r.ok === false) throw new Error(r.error);
+    if (r && r.ok === false) {
+      forget(r.missing);
+      throw new Error(r.missing?.length ? r.error + "，请在「数据」里重新补全" : r.error);
+    }
     todo.forEach((f) => histLoaded.add(f.name));
     return true;
   }
