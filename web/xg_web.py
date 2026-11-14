@@ -30,7 +30,7 @@ def _j(x) -> str:
 # - 直接用 pyarrow 读，每列单独转成 numpy、单独排序，不做整张表的 concat + sort_values
 # - 股票代码用同一批字符串对象（按代码编号取），不为每一行新建字符串
 # - 价格等 8 列直接填进一整块数组再交给 DataFrame（不让 pandas 之后自己合并、临时再复制一份）
-# - 常驻内存里的价格等用 float32（和下载的文件一样，不损失精度），每次筛选复制出区间时再转成 float64
+# - 价格等一直用 float32（和下载的文件一样），筛选时也不转 float64：转了内存翻倍，MACD 这类规则在长范围下会撑爆
 def _read(path: str):
     import pyarrow.parquet as pq
 
@@ -191,11 +191,11 @@ def add_history(names_json: str, folder: str) -> str:
 
 
 # 一次筛选最多用多少行（含预热）。浏览器里 Python 最多 4 GB 内存，规则代码本身还会复制几份数据，
-# 实测 900 万行（约全市场 6 年）时峰值约 2.3 GB，再多就可能把计算环境撑崩。
+# 用 float32 时，2015 年起的全部历史（约 1150 万行）在 Chrome 上一次能算完；再多就可能把计算环境撑崩。
 # 超过时：只看单只股票自身走势的规则，把股票分成几批分别算再合起来（慢一些）；
 # 要在股票之间比较的规则（排名、前 N 名、全市场平均等）分批会算错，只能提示缩短时间范围。
-MAX_ROWS = 9_000_000
-BATCH_ROWS = 4_000_000
+MAX_ROWS = 14_000_000
+BATCH_ROWS = 5_000_000
 BATCH = {"codes": None}  # 分批计算时，这一批的股票（按代码编号的布尔数组）
 
 
@@ -229,7 +229,7 @@ def _load(market, start=None, end=None):
         keep = np.cumsum(cnt[::-1]) <= MAX_ROWS
         earliest = pd.Timestamp(u[::-1][keep][-1]) + pd.Timedelta(days=prompts.LOOKBACK_DAYS)
         raise RangeTooLarge(f"{earliest:%Y-%m-%d}")
-    out = _frame(d["date"].to_numpy()[mask], d["code"].to_numpy()[mask], lambda c: d[c].to_numpy()[mask], np.float64)
+    out = _frame(d["date"].to_numpy()[mask], d["code"].to_numpy()[mask], lambda c: d[c].to_numpy()[mask], np.float32)
     return out, s.copy()
 
 
