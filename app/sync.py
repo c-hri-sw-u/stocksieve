@@ -284,6 +284,8 @@ def main() -> None:
     ap.add_argument("--list-only", action="store_true", help="只获取股票列表和行业分类（给并行下载做准备）")
     ap.add_argument("--apply-industry", action="store_true", help="不联网，把已有的 industry.parquet 写进股票表")
     ap.add_argument("--no-industry", action="store_true", help="不下载行业分类（有缓存就用缓存）")
+    ap.add_argument("--start", default="", help="日线开始日期 YYYY-MM-DD（代替 --years）")
+    ap.add_argument("--end", default="", help="日线结束日期 YYYY-MM-DD（默认最近一个已收盘的交易日；下载更早的历史用）")
     args = ap.parse_args()
 
     out = market_dir(MARKET)
@@ -335,11 +337,14 @@ def run(args, out: Path, hist_dir: Path, cancel_flag: Path, last_failed: list, s
         return
 
     # 只要已经收盘的交易日：盘中下载会拿到当天还没走完的半根 K 线
-    try:
-        end = latest_closed_day(trade_calendar(ak, out), beijing_now())
-    except Exception:
-        end = date.today() - timedelta(days=1)
-    start = end - timedelta(days=365 * args.years)
+    if args.end:
+        end = date.fromisoformat(args.end)
+    else:
+        try:
+            end = latest_closed_day(trade_calendar(ak, out), beijing_now())
+        except Exception:
+            end = date.today() - timedelta(days=1)
+    start = date.fromisoformat(args.start) if args.start else end - timedelta(days=365 * args.years)
     s, e = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
     today = datetime.now().date()
 
@@ -619,8 +624,10 @@ def run_incremental(args, out: Path, hist_dir: Path, cancel_flag: Path, status: 
     n_exright = len(redo)
     redo = list(dict.fromkeys(redo + new_codes))
     if redo and not cancel_flag.exists():
-        end = date.today()
-        s_, e_ = (end - timedelta(days=365 * extra["years"])).strftime("%Y%m%d"), target.strftime("%Y%m%d")
+        # 从现有数据的第一天开始重下，保持所有股票的起点一致（更早的历史按这个起点和它拼接）
+        first = load_meta(out).get("first_date")
+        start_ = date.fromisoformat(first) if first else date.today() - timedelta(days=365 * extra["years"])
+        s_, e_ = start_.strftime("%Y%m%d"), target.strftime("%Y%m%d")
         status.update(phase="daily", done=0, total=len(redo), daily_source="腾讯（东方财富备用）")
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             futs = {pool.submit(fetch_one, ak, c, s_, e_): c for c in redo}

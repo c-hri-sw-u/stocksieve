@@ -3,6 +3,8 @@
 - 日线按年拆成文件，当年按月拆（每天只有当月那个小文件会变，浏览器只需重新下载它）
 - 列精简、价格等用 float32、zstd 压缩
 - manifest.json 记录每个文件的大小、sha256、日期范围，浏览器据此只下载缺的或变了的文件
+- --history：把 export_history.py 准备好的更早历史（hist-YYYY.parquet）一起放进网站，记为 kind=history，
+  浏览器只在用户往前补全时才下载
 
 用法：
     python scripts/export_site_data.py                     # 全量
@@ -13,6 +15,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +45,7 @@ def main() -> None:
     ap.add_argument("--out", default=str(ROOT / "site" / "data"))
     ap.add_argument("--limit", type=int, default=0, help="只导出前 N 只（测试用）")
     ap.add_argument("--years", type=float, default=0, help="只导出最近 N 年（测试用）")
+    ap.add_argument("--history", default="", help="更早历史所在的目录（里面有 history.json），没有就跳过")
     args = ap.parse_args()
 
     src, out = Path(args.src), Path(args.out)
@@ -89,6 +93,20 @@ def main() -> None:
     for f in files:
         if "from_" in f:
             f["from"] = f.pop("from_")
+
+    history = {}
+    hdir = Path(args.history) if args.history else None
+    if hdir and (hdir / "history.json").exists():
+        h = json.loads((hdir / "history.json").read_text("utf-8"))
+        first = daily["date"].min().strftime("%Y-%m-%d")
+        # 历史必须和现有数据重叠（最后一个文件比现有数据的第一天多几周），浏览器靠重叠的那几天拼接
+        if h["to"] >= first and not args.limit and not args.years:
+            for f in h["files"]:
+                shutil.copy(hdir / f["name"], out / f["name"])
+                files.append({k: f[k] for k in ("name", "size", "sha256", "rows", "kind", "year", "from", "to")})
+            history = {"from": h["from"], "to": h["to"], "size": h["total_size"], "generated_at": h["generated_at"]}
+        else:
+            print(f"跳过历史数据：历史到 {h['to']}，现有数据从 {first} 开始，两段没有重叠")
     manifest = {
         "version": 1,
         "market": "cn_a",
@@ -96,11 +114,14 @@ def main() -> None:
         "first_date": daily["date"].min().strftime("%Y-%m-%d"),
         "last_date": last.strftime("%Y-%m-%d"),
         "stocks": int(daily["code"].nunique()),
-        "total_size": sum(f["size"] for f in files),
+        "total_size": sum(f["size"] for f in files if f["kind"] != "history"),
+        "history": history,
         "meta": {k: meta.get(k) for k in ("synced_at", "list_source", "daily_source", "industry_source", "years", "last_mode") if k in meta},
         "files": files,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1), "utf-8")
+    if history:
+        print(f"含更早的历史 {history['from']} ~ {history['to']}，{history['size'] / 1e6:.1f} MB（按需下载）")
     print(f"导出 {len(files)} 个文件，共 {manifest['total_size'] / 1e6:.1f} MB，{manifest['stocks']} 只，{manifest['first_date']} ~ {manifest['last_date']}")
 
 

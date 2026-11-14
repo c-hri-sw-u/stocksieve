@@ -259,6 +259,42 @@
   .dfoot { margin-top: 28px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--muted); }
   .sdot.new { background: var(--warn); opacity: 1; }
 
+  /* 时间范围：往前补全更早的历史。右端固定在最新交易日，左边的圆点只能往前拖 */
+  .rhead { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 14px; }
+  .rhead .lbl { margin: 0; }
+  .rspan { font-size: 13px; font-variant-numeric: tabular-nums; }
+  .track { position: relative; height: 44px; touch-action: none; user-select: none; -webkit-user-select: none; cursor: pointer; }
+  .rail, .seg { position: absolute; top: 18px; height: 8px; }
+  .rail { left: 0; right: 0; border-radius: 4px; background: var(--line); }
+  .seg.cov { background: var(--text); border-radius: 0 4px 4px 0; }
+  .seg.add { background: repeating-linear-gradient(135deg, var(--muted) 0 3px, transparent 3px 6px); border-radius: 4px 0 0 4px; overflow: hidden; }
+  .seg.add i { position: absolute; right: 0; top: 0; bottom: 0; width: 0; background: var(--text); transition: width .4s; }
+  .rlock { position: absolute; right: -2px; top: 11px; width: 4px; height: 22px; border-radius: 2px; background: var(--text); }
+  .rhandle { position: absolute; top: 9px; width: 26px; height: 26px; margin-left: -13px; border-radius: 50%; background: var(--bg);
+    border: 2px solid var(--text); cursor: ew-resize; display: grid; place-items: center; padding: 0; }
+  .rhandle::before { content: ""; width: 6px; height: 10px; border-left: 2px solid var(--text); border-right: 2px solid var(--text); box-sizing: border-box; opacity: .7; }
+  .rhandle:disabled { cursor: default; opacity: .5; }
+  .rhandle .tipb { position: absolute; bottom: 100%; left: 50%; transform: translate(-50%, -6px); background: var(--text); color: var(--bg); font-size: 12px;
+    padding: 3px 8px; border-radius: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; opacity: 0; transition: opacity .12s; }
+  .rhandle:hover .tipb, .rhandle.drag .tipb, .rhandle:focus-visible .tipb { opacity: 1; }
+  .rticks { position: relative; height: 16px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .rticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+  .rticks span:first-child { transform: none; }
+  .rticks .end { transform: translateX(-100%); color: var(--text); }
+  .rlegend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 10px; flex-wrap: wrap; }
+  .rlegend i { display: inline-block; width: 14px; height: 6px; border-radius: 3px; vertical-align: middle; margin-right: 6px; }
+  .rlegend .l1 { background: var(--text); }
+  .rlegend .l2 { background: repeating-linear-gradient(135deg, var(--muted) 0 3px, transparent 3px 6px); }
+  .rlegend .l3 { background: var(--line); }
+  .rchips { display: flex; gap: 6px; margin-top: 16px; flex-wrap: wrap; }
+  .rchip { border: 1px solid var(--box); background: none; color: var(--muted); border-radius: 999px; padding: 4px 11px; font-size: 13px; }
+  .rchip:hover { color: var(--text); border-color: var(--muted); }
+  .rchip[aria-pressed="true"] { color: var(--bg); background: var(--text); border-color: var(--text); }
+  #rload { margin-top: 16px; }
+  .rnote { font-size: 13px; color: var(--muted); margin: 10px 0 0; min-height: 1.4em; }
+  .rnote b { color: var(--text); font-weight: 600; }
+  .rnote .ok { color: var(--ok); }
+
   /* AI 设置 */
   .sdot.bad { background: var(--err); opacity: 1; }
   .seg { display: inline-flex; border: 1px solid var(--box); border-radius: 10px; padding: 2px; gap: 2px; }
@@ -391,6 +427,7 @@
         <option value="182">近 6 个月</option>
         <option value="365">近 1 年</option>
         <option value="1095">近 3 年</option>
+        <option value="1826">近 5 年</option>
         <option value="custom">自定义</option>
       </select></span>
       <span class="dates" id="dates"><input type="date" id="start" aria-label="开始日期">–<input type="date" id="end" aria-label="结束日期"></span>
@@ -466,6 +503,7 @@
   <div class="db">
     <p class="lbl">当前数据</p>
     <div id="dcur"></div>
+    <div id="drange"></div>
     <hr class="sep">
     <div id="dsync"></div>
   </div>
@@ -1385,6 +1423,8 @@ function renderData() {
       <dt>来源</dt><dd>${src}</dd></dl>`;
   }
 
+  renderRange(d, s);
+
   // 下载
   if (ds.years == null) ds.years = d.years || 3;
   let h = "";
@@ -1440,10 +1480,117 @@ function renderData() {
   }
 }
 
+// ---------------------------------------------------------------- 时间范围（网页版）
+// 一条时间轴：深色是本机已有的，斜线是拖出来要补的，浅灰是网站上有但没下载的更早年份。
+// 更早的历史按年一个文件，所以圆点按年份吸附；右端固定在最新交易日。
+const rs = { sel: null, key: "", drag: false };
+const dnum = (x) => Date.parse(x) / 86400000;
+function renderRange(d, s) {
+  const box = $("#drange"), h = d.history;
+  if (!STATIC || d.demo || !h || !h.files.length) { box.innerHTML = ""; rs.key = ""; return; }
+  const extending = s.state === "running" && s.mode === "extend";
+  const loaded = d.first_date, min = h.from, max = d.last_date;
+  // 吸附点：每个历史年份文件的第一天，加上现有数据的第一天
+  const snaps = [...h.files.map((f) => f.from), d.base_first_date].sort();
+  const key = [min, max, snaps.join()].join("|");
+  if (rs.key !== key) {
+    rs.key = key;
+    const y0 = +min.slice(0, 4), y1 = +max.slice(0, 4);
+    let ticks = "";
+    for (let y = y0; y <= y1; y += 2) {
+      const p = y === y0 ? 0 : ((dnum(`${y}-01-01`) - dnum(min)) / (dnum(max) - dnum(min))) * 100;
+      if (p < 92) ticks += `<span style="left:${p}%">${y}</span>`;
+    }
+    box.innerHTML = `<hr class="sep"><div class="rhead"><p class="lbl">时间范围</p><span class="rspan" id="rspan"></span></div>
+      <div class="track" id="rtrack"><div class="rail"></div><div class="seg add" id="radd"><i></i></div><div class="seg cov" id="rcov"></div>
+        <div class="rlock" title="右端固定在最新交易日，每天自动更新"></div>
+        <button class="rhandle" id="rhandle" role="slider" aria-label="数据从哪天开始"><span class="tipb" id="rtip"></span></button></div>
+      <div class="rticks">${ticks}<span class="end" style="left:100%">今天</span></div>
+      <div class="rlegend"><span><i class="l1"></i>已有</span><span><i class="l2"></i>将补全</span><span><i class="l3"></i>未下载</span></div>
+      <div class="rchips" id="rchips"></div>
+      <button class="primary" id="rload"></button>
+      <p class="rnote" id="rnote"></p>`;
+    bindRange();
+  }
+  if (!rs.sel || rs.sel > loaded || (!extending && !rs.drag && rs.sel === rs.lastLoaded)) rs.sel = loaded;
+  if (extending && s.extend_from) rs.sel = s.extend_from;
+  rs.lastLoaded = loaded; rs.snaps = snaps; rs.loaded = loaded; rs.min = min; rs.max = max; rs.h = h; rs.extending = extending;
+  drawRange(s);
+}
+function drawRange(s = ds.sync) {
+  const pct = (x) => ((dnum(x) - dnum(rs.min)) / (dnum(rs.max) - dnum(rs.min))) * 100;
+  const { sel, loaded, extending } = rs;
+  $("#rcov").style.left = pct(loaded) + "%"; $("#rcov").style.width = 100 - pct(loaded) + "%";
+  $("#radd").style.left = pct(sel) + "%"; $("#radd").style.width = Math.max(0, pct(loaded) - pct(sel)) + "%";
+  $("#radd i").style.width = extending && s.total ? Math.min(100, (s.done / s.total) * 100) + "%" : "0";
+  $("#rhandle").style.left = pct(sel) + "%";
+  $("#rhandle").disabled = extending;
+  $("#rtip").textContent = sel;
+  $("#rhandle").setAttribute("aria-valuetext", "从 " + sel);
+  const years = (dnum(rs.max) - dnum(sel)) / 365.25;
+  $("#rspan").textContent = `约 ${years >= 10 ? Math.round(years) : years.toFixed(1).replace(/\.0$/, "")} 年`;
+  // 快捷：近 5 年 / 近 8 年 / 全部。按年份文件吸附，所以实际会多一点
+  const target = (n) => { const t = new Date(Date.parse(rs.max) - n * 365.25 * 86400000).toISOString().slice(0, 10); return [...rs.snaps].reverse().find((x) => x <= t) || rs.snaps[0]; };
+  const chips = [[`近 5 年`, target(5)], [`近 8 年`, target(8)], [`全部（${rs.min.slice(0, 4)} 年起）`, rs.snaps[0]]]
+    .filter(([, v], i, a) => v < loaded && a.findIndex(([, w]) => w === v) === i);
+  const ch = chips.map(([t, v]) => `<button class="rchip" data-v="${v}" aria-pressed="${v === sel}"${extending ? " disabled" : ""}>${t}</button>`).join("");
+  if ($("#rchips").innerHTML !== ch) $("#rchips").innerHTML = ch;
+  const btn = $("#rload"), note = $("#rnote");
+  const need = rs.h.files.filter((f) => f.from >= sel && f.from < loaded && !f.have);
+  const mb = need.reduce((a, f) => a + f.size, 0) / 1e6;
+  const prevDay = new Date(Date.parse(loaded) - 86400000).toISOString().slice(0, 10);
+  if (extending) {
+    btn.disabled = true;
+    btn.textContent = `正在加载… ${s.total ? Math.floor((s.done / s.total) * 100) : 0}%`;
+    note.innerHTML = `${s.done || 0} / ${s.total || 0} MB · 可以关掉面板，原有数据照常能用`;
+  } else if (sel >= loaded) {
+    btn.disabled = true;
+    btn.textContent = loaded <= rs.snaps[0] ? "已经补到最早" : "往左拖动圆点，选择要补的年份";
+    note.innerHTML = s.state === "done" && s.extended_to && Date.now() - (s.done_at || 0) < 6000
+      ? `<span class="ok">✓ 已补全到 ${esc(s.extended_to)}</span>` : "右端固定在最新交易日，每天自动更新，不能拖动。";
+  } else {
+    btn.disabled = false;
+    btn.textContent = `加载 ${sel.slice(0, 7)} ~ ${prevDay.slice(0, 7)}`;
+    const yrs = (dnum(loaded) - dnum(sel)) / 365.25;
+    note.innerHTML = `补 <b>${yrs.toFixed(1).replace(/\.0$/, "")} 年</b>，约 <b>${Math.max(1, Math.round(mb))} MB</b>，已有的数据不会重新下载`;
+  }
+}
+function bindRange() {
+  const track = $("#rtrack"), handle = $("#rhandle");
+  // 只能吸附到已有起点及更早的年份
+  const snapAt = (x) => {
+    const r = track.getBoundingClientRect();
+    const day = dnum(rs.min) + Math.min(1, Math.max(0, (x - r.left) / r.width)) * (dnum(rs.max) - dnum(rs.min));
+    const opts = rs.snaps.filter((v) => v <= rs.loaded);
+    return opts.reduce((a, v) => (Math.abs(dnum(v) - day) < Math.abs(dnum(a) - day) ? v : a), opts[0]);
+  };
+  const set = (v) => { if (!rs.extending && v && v !== rs.sel) { rs.sel = v; drawRange(); } };
+  handle.addEventListener("pointerdown", (e) => { if (rs.extending) return; rs.drag = true; handle.classList.add("drag"); handle.setPointerCapture(e.pointerId); });
+  handle.addEventListener("pointermove", (e) => { if (rs.drag) set(snapAt(e.clientX)); });
+  const up = () => { rs.drag = false; handle.classList.remove("drag"); };
+  handle.addEventListener("pointerup", up); handle.addEventListener("pointercancel", up);
+  track.addEventListener("pointerdown", (e) => { if (!handle.contains(e.target)) set(snapAt(e.clientX)); });
+  handle.addEventListener("keydown", (e) => {
+    const opts = rs.snaps.filter((v) => v <= rs.loaded), i = opts.indexOf(rs.sel);
+    const k = { ArrowLeft: i - 1, ArrowDown: i - 1, ArrowRight: i + 1, ArrowUp: i + 1, Home: 0, End: opts.length - 1 }[e.key];
+    if (k === undefined) return;
+    e.preventDefault(); set(opts[Math.max(0, Math.min(opts.length - 1, k))]);
+  });
+  $("#rchips").addEventListener("click", (e) => { const b = e.target.closest(".rchip"); if (b) set(b.dataset.v); });
+  $("#rload").addEventListener("click", async () => {
+    if (rs.sel >= rs.loaded) return;
+    XG_STATIC.persist();
+    $("#rload").disabled = true;
+    const r = await fetch("/api/data/sync", { method: "POST", body: JSON.stringify({ mode: "extend", from: rs.sel }) });
+    if (!r.ok) { $("#rnote").textContent = (await r.json()).detail || "加载失败"; $("#rload").disabled = false; return; }
+    pollData();
+  });
+}
+
 // 网页版数据面板：检查中 / 已是最新 / 有新数据 / 完成 / 失败 / 还没有数据
 function staticSyncHTML(d, s) {
   const c = ds.check || {}, md = (x) => (x || "").slice(5);
-  const justDone = s.state === "done" && Date.now() - (s.done_at || 0) < 2000;
+  const justDone = s.state === "done" && s.mode !== "extend" && Date.now() - (s.done_at || 0) < 2000;  // 补全更早的数据在时间轴下面提示
   let main, sub = "", btn = "", link = "";
   if (s.state === "error") {
     main = `<b class="bad">下载失败，可能是网络问题</b>`; sub = esc(s.message || "");

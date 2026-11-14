@@ -34,6 +34,7 @@ jobs:
     timeout-minutes: 60
     outputs:
       mode: ${{ steps.mode.outputs.mode }}
+      start: ${{ steps.mode.outputs.start }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,6 +49,9 @@ jobs:
         name: 决定增量还是全量
         run: |
           if [ "${{ inputs.full }}" = "true" ] || [ ! -f data/cn_a/daily.parquet ]; then echo "mode=full" >> "$GITHUB_OUTPUT"; else echo "mode=incremental" >> "$GITHUB_OUTPUT"; fi
+          # 有更早的历史（history 流程准备的）时，全量下载从历史拼接的那天开始，保证两段数据接得上
+          gh release download data-history -D data/history --pattern history.json --clobber 2>/dev/null || true
+          if [ -f data/history/history.json ]; then echo "start=$(python -c "import json;print(json.load(open('data/history/history.json'))['base_from'])")" >> "$GITHUB_OUTPUT"; fi
       - name: 增量更新（只补最新交易日）
         if: steps.mode.outputs.mode == 'incremental'
         run: python -u -m app.sync --incremental --workers 6 --no-industry 2>&1 | tr '\r' '\n' | grep -v -E '^\s*$|it/s|s/it'
@@ -115,7 +119,7 @@ jobs:
       - name: 下载第 ${{ matrix.part }} 组
         run: |
           touch data/cn_a/spot_cache.parquet   # 用 prepare 取好的同一份股票列表
-          python -u -m app.sync --full --chunk ${{ matrix.part }}/6 --years 3 --workers 6 --no-industry 2>&1 | tr '\r' '\n' | grep -v -E '^\s*$|it/s|s/it' | tail -20
+          python -u -m app.sync --full --chunk ${{ matrix.part }}/6 --years 3 ${{ needs.prepare.outputs.start && format('--start {0}', needs.prepare.outputs.start) || '' }} --workers 6 --no-industry 2>&1 | tr '\r' '\n' | grep -v -E '^\s*$|it/s|s/it' | tail -20
       - uses: actions/upload-artifact@v4
         with:
           name: hist-${{ matrix.part }}
@@ -173,10 +177,12 @@ jobs:
           cat data/cn_a/meta.json
           gh release view data-latest >/dev/null 2>&1 || gh release create data-latest --title "数据（自动更新）" --notes "StockSieve 的行情数据，由 GitHub Actions 每个交易日自动更新。网页从 GitHub Pages 读取导出后的版本。" --latest=false
           gh release upload data-latest data/cn_a/daily.parquet data/cn_a/stocks.parquet data/cn_a/meta.json $(ls data/cn_a/industry.parquet data/cn_a/spot_cache.parquet data/cn_a/sw_levels.json data/cn_a/industry_sw_partial.json 2>/dev/null) --clobber
+      - name: 下载更早的历史（只准备一次，见 history.yml）
+        run: gh release download data-history -D data/history --pattern '*' --clobber || echo "还没有更早的历史数据"
       - name: 生成静态网站
         run: |
           python scripts/build_web.py --no-data
-          python scripts/export_site_data.py --out site/data
+          python scripts/export_site_data.py --out site/data --history data/history
           du -sh site site/data
       - uses: actions/upload-pages-artifact@v3
         with: { path: site }

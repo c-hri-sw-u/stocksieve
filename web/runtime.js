@@ -16,11 +16,25 @@
   // ---------------------------------------------------------------- 本机数据索引
   const loadIndex = () => { try { return JSON.parse(localStorage.getItem(INDEX_KEY) || "null") || { files: {} }; } catch (e) { return { files: {} }; } };
   const saveIndex = (ix) => { try { localStorage.setItem(INDEX_KEY, JSON.stringify(ix)); } catch (e) {} };
-  let index = loadIndex();  // { manifest: 本机这份数据对应的 manifest, files: {名字: sha256}, remote: 最近看到的远端 manifest 概要 }
-  const complete = () => !!index.manifest && index.manifest.files.every((f) => index.files[f.name] === f.sha256);
+  // { manifest: 本机这份数据对应的 manifest, files: {名字: sha256}, remote: 最近看到的远端 manifest 概要,
+  //   histFrom: 用户在「时间范围」里往前补到的日期（更早的历史按年一个文件，只下载这一天以后的） }
+  let index = loadIndex();
+  const has = (f) => index.files[f.name] === f.sha256;
+  const baseFiles = (m) => m.files.filter((f) => f.kind !== "history");
+  // 更早的历史：从新到旧
+  const histFiles = (m) => m.files.filter((f) => f.kind === "history").sort((a, b) => (a.from < b.from ? 1 : -1));
+  const wantedHist = (m) => (index.histFrom ? histFiles(m).filter((f) => f.to >= index.histFrom) : []);
+  const wanted = (m) => [...baseFiles(m), ...wantedHist(m)];
+  // 能用的历史：从最新的年份往前、连续都已下载的那几个（中途取消的话只用接得上的部分）
+  function usableHist(m) {
+    const out = [];
+    for (const f of wantedHist(m)) { if (!has(f)) break; out.push(f); }
+    return out;
+  }
+  const complete = () => !!index.manifest && baseFiles(index.manifest).every(has);
 
   // ---------------------------------------------------------------- 计算 worker
-  let worker = null, seq = 0, pending = new Map(), workerReady = null, dataLoaded = null;
+  let worker = null, seq = 0, pending = new Map(), workerReady = null, dataLoaded = null, histLoaded = new Set();
   const engine = { stage: "", readyMs: null };
   const LOAD_TIMEOUT = 150000;  // 计算环境（Python + pandas）最多等 150 秒
   // 计算环境起不来时：所有等待中的调用立刻失败，下次用到时重新启动 worker（相当于「重试」）
@@ -29,7 +43,7 @@
     err.kind = "engine";
     engine.stage = ""; engine.error = err.message; engine.ready = false;
     try { worker?.terminate(); } catch (e) {}
-    worker = null; dataLoaded = null;
+    worker = null; dataLoaded = null; histLoaded = new Set();
     for (const q of pending.values()) { clearTimeout(q.timer); q.reject(err); }
     pending.clear();
   }
@@ -60,7 +74,7 @@
       const p = { resolve, reject, timer: null };
       p.timer = setTimeout(() => {
         // 超时：直接结束 worker（停止计算），下次用到时重新启动
-        pending.delete(id); worker?.terminate(); worker = null; dataLoaded = null;
+        pending.delete(id); worker?.terminate(); worker = null; dataLoaded = null; histLoaded = new Set();
         for (const q of pending.values()) { clearTimeout(q.timer); q.reject(new Error("计算已中止")); }
         pending.clear();
         reject(new Error(loading && !engine.ready ? "计算环境加载超时：Python 运行环境下载太慢（网络问题），请重试"
@@ -73,12 +87,28 @@
   async function ensureData() {
     if (!worker) startWorker();
     if (!dataLoaded) {
-      dataLoaded = complete() ? call("loadData", [index.manifest]) : Promise.resolve({ ok: false });
+      dataLoaded = complete() ? loadBase(index.manifest) : Promise.resolve({ ok: false });
       dataLoaded.catch(() => { dataLoaded = null; });
     }
     return dataLoaded;
   }
   const py = (fn, ...args) => call("call", [fn, ...args]);
+  function loadBase(m) { histLoaded = new Set(); return call("loadData", [m]); }
+
+  // 筛选的开始日期（再往前约 400 天预热）早于现有数据时，把需要的那几年历史接上。
+  // 只在用到时才载入：十几年的数据全放进浏览器内存太大
+  const LOOKBACK_DAYS = 400;  // 和 app/prompts.py 的 LOOKBACK_DAYS 一致
+  async function ensureHistory(start) {
+    const m = index.manifest;
+    if (!m || !start || !index.histFrom) return;
+    const need = new Date(Date.parse(start) - (LOOKBACK_DAYS + 7) * 86400000).toISOString().slice(0, 10);
+    if (need >= m.first_date) return;
+    const todo = usableHist(m).filter((f) => f.to >= need && !histLoaded.has(f.name));
+    if (!todo.length) return;
+    const r = await call("addHistory", [todo.map((f) => f.name)], 180000);
+    if (r && r.ok === false) throw new Error(r.error);
+    todo.forEach((f) => histLoaded.add(f.name));
+  }
 
   // ---------------------------------------------------------------- 检查更新（只看 manifest，不下载）
   // state: idle | checking | latest | available | none（本机还没数据） | error
@@ -91,7 +121,7 @@
       if (!r.ok) throw new Error("HTTP " + r.status);
       const m = await r.json();
       index.remote = { last_date: m.last_date, generated_at: m.generated_at, total_size: m.total_size }; saveIndex(index);
-      const need = m.files.filter((f) => index.files[f.name] !== f.sha256);
+      const need = wanted(m).filter((f) => !has(f));
       const bytes = need.reduce((a, f) => a + f.size, 0);
       Object.assign(check, { state: !complete() ? "none" : need.length ? "available" : "latest", last_date: m.last_date,
                              mb: +(bytes / 1e6).toFixed(1), bytes, total_mb: +(m.total_size / 1e6).toFixed(1), message: "" });
@@ -105,10 +135,16 @@
   let abort = null;
   const now = () => new Date().toISOString().slice(0, 19).replace("T", " ");
 
-  async function startSync(mode) {
+  async function startSync(mode, from) {
     if (sync.state === "running") throw Object.assign(new Error("已经有下载在进行中"), { status: 409 });
-    Object.assign(sync, { state: "running", phase: "list", phase_label: "获取文件清单", mode, mode_label: mode === "clear" ? "清除本地数据" : "下载到本机",
+    if (mode === "extend") {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(from || "")) throw Object.assign(new Error("开始日期不正确"), { status: 400 });
+      if (!index.histFrom || from < index.histFrom) { index.histFrom = from; saveIndex(index); }
+    }
+    Object.assign(sync, { state: "running", phase: "list", phase_label: "获取文件清单", mode,
+                          mode_label: mode === "clear" ? "清除本地数据" : mode === "extend" ? "补全更早的数据" : "下载到本机",
                           done: 0, total: 0, failed: [], message: "", started_at: now(), updated_at: now(), finished_at: null,
+                          extend_from: mode === "extend" ? from : null, extended_to: null,
                           list_source: "", daily_source: "" });
     abort = new AbortController();
     runSync(mode, abort.signal).catch((e) => {
@@ -118,7 +154,7 @@
 
   async function runSync(mode, signal) {
     if (mode === "clear") {
-      await XGStore.clear(); index = { files: {}, remote: index.remote }; saveIndex(index);
+      await XGStore.clear(); index = { files: {}, remote: index.remote }; saveIndex(index); histLoaded = new Set();
       if (worker) { worker.terminate(); worker = null; }
       Object.assign(sync, { state: "idle", message: "本地数据已清除", finished_at: now() });
       Object.assign(check, { state: "none", mb: index.remote?.total_size ? +(index.remote.total_size / 1e6).toFixed(1) : 0 });
@@ -127,7 +163,9 @@
     if (mode === "full") { await XGStore.clear(); index.files = {}; saveIndex(index); }
     const m = await (await realFetch("data/manifest.json", { cache: "no-cache", signal })).json();
     index.remote = { last_date: m.last_date, generated_at: m.generated_at, total_size: m.total_size };
-    const need = m.files.filter((f) => index.files[f.name] !== f.sha256);
+    // 先下现有数据，再从新到旧下历史（中途取消时，已下的历史也能接上用）
+    const need = wanted(m).filter((f) => !has(f));
+    const baseChanged = need.some((f) => f.kind !== "history");
     const total = need.reduce((a, f) => a + f.size, 0);
     Object.assign(sync, { phase: "daily", phase_label: "下载数据（MB）", total: +(total / 1e6).toFixed(1), done: 0, updated_at: now() });
     let got = 0;
@@ -150,10 +188,14 @@
     // 删掉远端已经没有的旧文件（比如上个月的月文件并进了年文件）
     const keep = new Set(m.files.map((f) => f.name));
     for (const n of Object.keys(index.files)) if (!keep.has(n)) { await XGStore.del(n); delete index.files[n]; }
+    const histChanged = !!index.manifest && JSON.stringify(histFiles(index.manifest).map((f) => f.sha256)) !== JSON.stringify(histFiles(m).map((f) => f.sha256));
     index.manifest = m; saveIndex(index);
     Object.assign(sync, { phase: "merge", phase_label: "载入数据" });
-    if (worker) { dataLoaded = call("loadData", [m]); await dataLoaded; }
+    // 只新下了历史的话不用重载：下次筛选用到时再接上
+    if (worker && (baseChanged || histChanged || !dataLoaded)) { dataLoaded = loadBase(m); await dataLoaded; }
+    const hist = usableHist(m);
     Object.assign(sync, { state: "done", finished_at: now(), done_at: Date.now(), updated_to: m.last_date,
+      extended_to: mode === "extend" && hist.length ? hist[hist.length - 1].from : null,
       message: need.length ? `已更新到 ${m.last_date} · 下载 ${(total / 1e6).toFixed(1)} MB` : `已是最新（${m.last_date}）` });
     Object.assign(check, { state: "latest", last_date: m.last_date, mb: 0, total_mb: +(m.total_size / 1e6).toFixed(1), message: "" });
   }
@@ -166,9 +208,14 @@
                remote: index.remote || null, cached_mb: 0 };
     }
     const meta = m.meta || {};
-    return { market: "cn_a", demo: false, stocks: m.stocks, first_date: m.first_date, last_date: m.last_date, synced_at: m.generated_at,
+    const usable = usableHist(m), hf = histFiles(m);
+    const cached = m.files.filter(has).reduce((a, f) => a + f.size, 0);
+    return { market: "cn_a", demo: false, stocks: m.stocks, first_date: usable.length ? usable[usable.length - 1].from : m.first_date,
+             base_first_date: m.first_date, last_date: m.last_date, synced_at: m.generated_at,
              list_source: meta.list_source || "", daily_source: meta.daily_source || "", industry_source: meta.industry_source || "",
-             years: meta.years, remote: index.remote || null, cached_mb: +(m.total_size / 1e6).toFixed(1), static: true };
+             years: meta.years, remote: index.remote || null, cached_mb: +(cached / 1e6).toFixed(1), static: true,
+             // 时间范围：网站上有的更早历史（按年），以及本机已经补到哪
+             history: hf.length ? { from: hf[hf.length - 1].from, files: hf.map((f) => ({ year: f.year, from: f.from, to: f.to, size: f.size, have: has(f) })) } : null };
   }
 
   // ---------------------------------------------------------------- 筛选
@@ -188,6 +235,8 @@
     return { ...r, code, understanding, assumptions: [], attempts: 1, seconds: +((performance.now() - t0) / 1000).toFixed(1), source };
   }
   async function runCode(market, start, end, code) {
+    try { await ensureHistory(start); }
+    catch (e) { if (e.kind === "engine" || /计算环境/.test(e.message)) throw e; return { ok: false, error: "载入更早的历史数据失败：" + e.message }; }
     try { return await call("run", [market, start, end, code], EXEC_TIMEOUT); }
     catch (e) { if (e.kind === "engine" || /计算环境/.test(e.message)) throw e; return { ok: false, error: e.message }; }
   }
@@ -373,7 +422,7 @@
     }
     if (path === "/api/data/status") return json({ data: dataStatus(), sync: { ...sync }, check: { ...check } });
     if (path === "/api/data/check" && method === "POST") { runCheck(); return json({ ok: true }); }
-    if (path === "/api/data/sync" && method === "POST") { await startSync(body.mode === "full" || body.mode === "clear" ? body.mode : "update"); return json({ ok: true }); }
+    if (path === "/api/data/sync" && method === "POST") { await startSync(["full", "clear", "extend"].includes(body.mode) ? body.mode : "update", body.from); return json({ ok: true }); }
     if (path === "/api/data/cancel" && method === "POST") { if (sync.state !== "running") return json({ detail: "当前没有进行中的下载" }, 409); abort?.abort(); return json({ ok: true }); }
     if (path === "/api/ai/test" && method === "POST") {
       const ai = aiFromHeaders(headers);

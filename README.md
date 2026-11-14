@@ -51,6 +51,7 @@ python3 -m venv .venv
 
 - 数据：完整数据存在 Release `data-latest`（不进 git）；导出给网页的数据按年 / 月拆分，全量约 80 MB，之后每天只下载变化的小文件。
 - 需要在仓库 Settings → Pages 把 Source 设为「GitHub Actions」。手动全量更新：Actions → data → Run workflow，勾选 full。
+- 更早的历史（「数据 → 时间范围」往前补全用）：Actions → history → Run workflow（默认从 2015 年起）一次性下载、按年打包存到 Release `data-history`，跑完再运行一次 data。网页默认只下载最近 3 年，用户往前拖时才按年下载；历史价格用和现有数据重叠的几天按比例对齐到同一前复权基准。
 
 本地预览网页版：
 
