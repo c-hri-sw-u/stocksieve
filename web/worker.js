@@ -1,18 +1,35 @@
 // 计算 worker：在浏览器里用 Pyodide 跑 Python（pandas），执行筛选代码。
 // 和本地网站共用同一份 Python 源码（app/*.py），由 scripts/build_web.py 拷到 py/ 下。
 importScripts("storage.js");
-const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.29.3/full/";
-importScripts(PYODIDE_URL + "pyodide.js");
+// Pyodide 优先从同一网站的 pyodide/ 目录加载（scripts/fetch_pyodide.py 放进去的），失败再试 CDN。
+// 只靠 cdn.jsdelivr.net 的话，在连不上它的网络里计算环境会一直加载失败。
+const PYODIDE_VERSION = "0.29.3";  // 和 scripts/fetch_pyodide.py 保持一致
+const SOURCES = [
+  new URL("pyodide/", self.location.href).href,
+  `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`,
+];
 
 let py = null, X = null;
 const say = (stage) => postMessage({ type: "progress", stage });
 
-const ready = (async () => {
+async function boot() {
   const t0 = performance.now();
   say("加载 Python 运行环境");
-  py = await loadPyodide({ indexURL: PYODIDE_URL });
-  say("加载 pandas");
-  await py.loadPackage(["numpy", "pandas", "pyarrow"]);
+  let lastErr = null;
+  for (const url of SOURCES) {
+    try {
+      importScripts(url + "pyodide.js");
+      py = await loadPyodide({ indexURL: url });
+      say("加载 pandas");
+      await py.loadPackage(["numpy", "pandas", "pyarrow"]);
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e; py = null;
+      say("换一个地址加载 Python 运行环境");
+    }
+  }
+  if (lastErr || !py) throw new Error("无法下载 Python 运行环境（网络问题）：" + String(lastErr && lastErr.message || lastErr).slice(0, 160));
   say("加载筛选程序");
   const files = await (await fetch("py/files.json", { cache: "no-cache" })).json();
   for (const f of files) {
@@ -23,7 +40,13 @@ const ready = (async () => {
   py.runPython("import sys; sys.path.insert(0, '/home/pyodide')");
   X = py.pyimport("xg_web");
   postMessage({ type: "ready", ms: Math.round(performance.now() - t0) });
-})();
+}
+
+const ready = boot().catch((e) => {
+  // 告诉页面：计算环境起不来了，别让调用一直等
+  postMessage({ type: "fatal", error: String(e && e.message || e) });
+  throw e;
+});
 
 const handlers = {
   // 把本机缓存的数据文件交给 Python，读进内存
