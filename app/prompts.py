@@ -41,7 +41,8 @@ def system_prompt(ind_label: str = "行业名称", ind2_label: str = "二级行�
 定义 `def screen(daily, stocks, start, end):`，返回一个 pandas DataFrame：
 - 必须有 `code` 列（6 位股票代码字符串），每只股票一行。用与规则最相关的「一个」指标列排序（sort_values，最符合的在前），并把这一列放在返回结果里，界面会把它标成默认排序列。
 - 另外放 2~6 列能说明「为什么选中」的指标，列名用简短中文并注明单位，例如「20日涨幅%」「总市值(亿)」。不用放名称和行业，系统会自动补上。
-- start、end 是 pd.Timestamp，是用户选择的时间范围。daily 里包含 start 之前约 {LOOKBACK_DAYS} 个自然日的预热数据，方便计算均线等指标；判断条件时注意用 in_range(d, start, end) 截取区间。
+- start、end 是 pd.Timestamp，是用户选择的时间范围，表示「事件发生在哪段时间」。daily 是本机已下载的全部日线（截至 end，开始日期因用户下载了多少而不同，通常比 start 早很多），计算均线等指标直接用；判断条件时用 in_range(d, start, end) 截取区间。
+- 「历史新低/新高」「上市以来」「有数据以来」= 用 daily 里该股票的全部数据，不要只用 [start, end]；如果数据开始日期晚于该股上市日，在 assumptions 里说明「历史」指本机已有数据的范围。
 - 用户说「最近 N 天/日」时，指截至 end 的最近 N 个交易日；没说时间口径时，默认条件在 end 这一天成立，区间类条件（涨幅、回撤、出现过某信号）用 [start, end]。
 - A 股术语：「涨停/跌停」一律用 limit_up / limit_down 判断（已区分主板、创业板、科创板、北交所、ST 和新股），不要自己写阈值。
 - 「连续 N 个涨停」「N 连板」= 连续 N 个交易日涨停。默认理解为「区间内出现过至少 N 连板」（runs(daily, limit_up(daily, stocks)) 里 length >= N 且该段落在区间内）；用户说「正好 N 个」「只要 N 个」「不要更多」时，才是某段连板的最终长度恰好为 N（length == N）。
