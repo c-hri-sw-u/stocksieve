@@ -532,7 +532,22 @@ function applyRange() {
   $("#end").value = fmt(end);
   $("#start").value = fmt(new Date(end.getTime() - v * 86400000));
 }
-$("#range").onchange = () => { applyRange(); fit($("#range")); };
+// 记住上次选的时间范围（自定义时连日期一起记）
+const RANGE_KEY = "xg.range.v1";
+function saveRange() {
+  const v = $("#range").value;
+  try { localStorage.setItem(RANGE_KEY, JSON.stringify(v === "custom" ? { v, start: $("#start").value, end: $("#end").value } : { v })); } catch (e) {}
+}
+function restoreRange() {
+  let r = null;
+  try { r = JSON.parse(localStorage.getItem(RANGE_KEY) || "null"); } catch (e) {}
+  if (!r || ![...$("#range").options].some((o) => o.value === r.v)) return;
+  $("#range").value = r.v;
+  if (r.v === "custom" && r.start && r.end) { $("#start").value = r.start; $("#end").value = r.end; }
+}
+$("#range").onchange = () => { applyRange(); fit($("#range")); saveRange(); };
+$("#start").addEventListener("change", saveRange);
+$("#end").addEventListener("change", saveRange);
 
 // 下拉框宽度跟随当前选中项，而不是最长的选项
 const ruler = document.createElement("span");
@@ -557,6 +572,7 @@ async function init() {
     o.disabled = !m.enabled; $("#market").add(o);
   }
   $("#market").onchange = () => fit($("#market"));
+  restoreRange();
   fit($("#market")); fit($("#range"));
   applyRange();
   const ex = $("#examples");
