@@ -105,15 +105,13 @@
   }
   function loadBase(m) { histLoaded = new Set(); return call("loadData", [m]); }
 
-  // 筛选的开始日期（再往前约 400 天预热）早于现有数据时，把需要的那几年历史接上。
-  // 只在用到时才载入：十几年的数据全放进浏览器内存太大
-  const LOOKBACK_DAYS = 400;  // 和 app/prompts.py 的 LOOKBACK_DAYS 一致
+  // 已下载的数据全部交给规则：用户补全过更早的历史，筛选前先把它接上（第一次要等一会，之后一直在内存里）
   async function ensureHistory(start, emit) {
     const m = index.manifest;
-    if (!m || !start || !index.histFrom) return false;
-    const need = new Date(Date.parse(start) - (LOOKBACK_DAYS + 7) * 86400000).toISOString().slice(0, 10);
-    if (need >= m.first_date) return false;
-    const todo = usableHist(m).filter((f) => f.to >= need && !histLoaded.has(f.name));
+    if (!m || !index.histFrom) return false;
+    const usable = usableHist(m);
+    if (!usable.length) return false;
+    const todo = usable.filter((f) => !histLoaded.has(f.name));
     if (!todo.length) return true;
     const years = todo.map((f) => +f.from.slice(0, 4));
     const lo = Math.min(...years), hi = Math.max(...years);
@@ -254,10 +252,10 @@
     let long = false;
     try { long = await ensureHistory(start, emit); }
     catch (e) { if (e.kind === "engine" || /计算环境/.test(e.message)) throw e; return { ok: false, error: "载入更早的历史数据失败：" + e.message }; }
-    if (long) emit?.({ type: "status", stage: "running", text: "运行中（时间范围长，可能要半分钟以上）" });
+    if (long) emit?.({ type: "status", stage: "running", text: "运行中（数据多，可能要半分钟左右）" });
     try {
       const go = () => call("run", [market, start, end, code], EXEC_TIMEOUT);
-      return await (long ? withStage("筛选中", "时间范围长，可能要半分钟以上", go) : go());
+      return await (long ? withStage("筛选中", "数据多，可能要半分钟左右", go) : go());
     }
     catch (e) { if (e.kind === "engine" || /计算环境/.test(e.message)) throw e; return { ok: false, error: e.message }; }
   }

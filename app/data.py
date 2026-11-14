@@ -91,25 +91,23 @@ def _demo_tables() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 # ---------------------------------------------------------------- 读取
 def load(market: str, start: str | None = None, end: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """读取 [start - 预热期, end] 区间的日线和股票表。"""
+    """读取截至 end 的全部日线和股票表。
+
+    start 只是用户关心的事件时间段的开始，不用来截数据：规则需要多长的历史就用多长（「历史新低」「上市以来」等），
+    时间段由规则代码自己用 in_range 截取。
+    """
     if use_demo(market):
         daily, stocks = _demo_tables()
         daily = daily.copy()
     else:
         d = market_dir(market)
         filters = None
-        if start or end:
-            filters = []
-            if start:
-                filters.append(("date", ">=", pd.Timestamp(start) - pd.Timedelta(days=config.LOOKBACK_DAYS)))
-            if end:
-                filters.append(("date", "<=", pd.Timestamp(end)))
+        if end:
+            filters = [("date", "<=", pd.Timestamp(end))]
         daily = pd.read_parquet(d / "daily.parquet", filters=filters)
         stocks = pd.read_parquet(d / "stocks.parquet")
         if "industry2" not in stocks.columns:
             stocks["industry2"] = ""
-    if start:
-        daily = daily[daily["date"] >= pd.Timestamp(start) - pd.Timedelta(days=config.LOOKBACK_DAYS)]
     if end:
         daily = daily[daily["date"] <= pd.Timestamp(end)]
     daily = daily.sort_values(["code", "date"]).reset_index(drop=True)

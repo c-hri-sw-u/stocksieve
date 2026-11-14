@@ -196,7 +196,8 @@ def add_history(names_json: str, folder: str) -> str:
 # 要在股票之间比较的规则（排名、前 N 名、全市场平均等）分批会算错，只能提示缩短时间范围。
 MAX_ROWS = 14_000_000
 BATCH_ROWS = 5_000_000
-BATCH = {"codes": None}  # 分批计算时，这一批的股票（按代码编号的布尔数组）
+BATCH = {"codes": None, "from": None}  # 分批计算时这一批的股票（按代码编号的布尔数组）；from：只给这天之后的数据
+TRIM_DAYS = 400  # 要在股票之间比较、数据又太多时，只给开始日期前这么多天起的数据（够算均线等指标）
 
 
 class RangeTooLarge(Exception):
@@ -213,22 +214,18 @@ def _load(market, start=None, end=None):
         return d.copy(), s.copy()
     d, s = STATE["daily"], STATE["stocks"]
     # 只复制一次：筛选区间（含预热）的那部分。runner 不再整表复制（runner.COPY_INPUT = False）
+    # 已下载的数据全部给规则（截至 end）；start 只是事件时间段，由规则代码自己截取
     mask = np.ones(len(d), dtype=bool)
-    if start:
-        mask &= (d["date"] >= pd.Timestamp(start) - pd.Timedelta(days=prompts.LOOKBACK_DAYS)).to_numpy()
     if end:
         mask &= (d["date"] <= pd.Timestamp(end)).to_numpy()
+    if BATCH["from"] is not None:
+        mask &= (d["date"] >= BATCH["from"]).to_numpy()
     if BATCH["codes"] is not None:
         mask &= BATCH["codes"][STATE["idx"]]
         s = s[s["code"].isin(set(STATE["cats"][BATCH["codes"]]))]
     n = int(mask.sum())
     if n > MAX_ROWS and BATCH["codes"] is None:
-        # 算出最早能从哪天开始：从结束日往前数，行数不超过上限（再留出预热的天数）
-        dates = d["date"].to_numpy()[mask]
-        u, cnt = np.unique(dates, return_counts=True)
-        keep = np.cumsum(cnt[::-1]) <= MAX_ROWS
-        earliest = pd.Timestamp(u[::-1][keep][-1]) + pd.Timedelta(days=prompts.LOOKBACK_DAYS)
-        raise RangeTooLarge(f"{earliest:%Y-%m-%d}")
+        raise RangeTooLarge()
     out = _frame(d["date"].to_numpy()[mask], d["code"].to_numpy()[mask], lambda c: d[c].to_numpy()[mask], np.float32)
     return out, s.copy()
 
@@ -250,9 +247,15 @@ def run(market: str, start: str, end: str, code: str) -> str:
             return _j(runner.execute(market, start, end, code))
         except RangeTooLarge as e:
             if _cross_sectional(code):
-                tip = f"请把开始日期改到 {e} 或之后再试" if str(e) <= end else "请缩短时间范围再试"
-                return _j({"ok": False, "error": f"时间范围太长：这条规则要在股票之间比较（排名、前几名、全市场平均等），没法分批算，"
-                                                  f"浏览器内存不够一次算完。{tip}"})
+                # 要在股票之间比较，不能分批：退一步只给开始日期前约 400 天起的数据（以前的做法），一般规则够用
+                BATCH["from"] = pd.Timestamp(start) - pd.Timedelta(days=TRIM_DAYS)
+                try:
+                    return _j(runner.execute(market, start, end, code))
+                except RangeTooLarge:
+                    return _j({"ok": False, "error": "时间范围太长：这条规则要在股票之间比较（排名、前几名、全市场平均等），"
+                                                      "没法分批算，浏览器内存不够一次算完。请缩短时间范围再试"})
+                finally:
+                    BATCH["from"] = None
             return _j(_run_batched(market, start, end, code))
     except MemoryError:
         return _j({"ok": False, "error": "浏览器内存不够：时间范围太长、数据太多。请缩短时间范围再试"})
@@ -273,9 +276,7 @@ def _cross_sectional(code: str) -> bool:
 def _run_batched(market: str, start: str, end: str, code: str) -> dict:
     """股票分几批，每批数据量在 BATCH_ROWS 以内，分别跑同一段规则，再把结果合起来。"""
     d = STATE["daily"]
-    mask = np.ones(len(d), dtype=bool)
-    mask &= (d["date"] >= pd.Timestamp(start) - pd.Timedelta(days=prompts.LOOKBACK_DAYS)).to_numpy()
-    mask &= (d["date"] <= pd.Timestamp(end)).to_numpy()
+    mask = (d["date"] <= pd.Timestamp(end)).to_numpy()
     rows_per_code = np.bincount(STATE["idx"][mask], minlength=len(STATE["cats"]))
     del mask
     groups, cur, acc = [], [], 0
