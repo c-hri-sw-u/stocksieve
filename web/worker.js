@@ -54,12 +54,14 @@ const handlers = {
     const dir = "/xgdata";
     py.FS.mkdirTree(dir);
     for (const n of py.FS.readdir(dir)) if (n !== "." && n !== "..") py.FS.unlink(dir + "/" + n);
+    const missing = [];  // 索引里记着已下载、本机缓存里却没有的文件（浏览器清掉了网站数据）
     for (const f of manifest.files) {
       if (f.kind === "history") continue;  // 更早的历史用到时才载入（addHistory）
       const buf = await XGStore.get(f.name);
       if (buf) py.FS.writeFile(dir + "/" + f.name, new Uint8Array(buf));
+      else missing.push(f.name);
     }
-    const r = JSON.parse(X.load_files(JSON.stringify(manifest), dir));
+    const r = { ...JSON.parse(X.load_files(JSON.stringify(manifest), dir)), missing };
     for (const n of py.FS.readdir(dir)) if (n !== "." && n !== "..") py.FS.unlink(dir + "/" + n);  // 已经在内存里了，删掉省空间
     return r;
   },
@@ -68,10 +70,13 @@ const handlers = {
     const dir = "/xghist";
     py.FS.mkdirTree(dir);
     try {
+      const missing = [];
       for (const n of names) {
         const buf = await XGStore.get(n);
         if (buf) py.FS.writeFile(dir + "/" + n, new Uint8Array(buf));
+        else missing.push(n);
       }
+      if (missing.length) return { ok: false, missing, error: "本机缓存里的部分历史数据不见了" };
       return JSON.parse(X.add_history(JSON.stringify(names), dir));
     } finally {
       for (const n of py.FS.readdir(dir)) if (n !== "." && n !== "..") py.FS.unlink(dir + "/" + n);
