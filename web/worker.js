@@ -92,6 +92,13 @@ onmessage = async (e) => {
     await ready;
     postMessage({ id, ok: true, result: await handlers[cmd](...(args || [])) });
   } catch (err) {
-    postMessage({ id, ok: false, error: String(err && err.message || err) });
+    const msg = String(err && err.message || err);
+    // Python 运行环境崩了（多半是内存不够）：之后的调用都会失败，让页面重启 worker
+    if (py && /fatal/i.test(msg)) {
+      postMessage({ id, ok: false, error: "计算环境内存不够崩溃了，已重新启动。请缩短时间范围再试" });
+      postMessage({ type: "crashed" });
+      return;
+    }
+    postMessage({ id, ok: false, error: msg });
   }
 };

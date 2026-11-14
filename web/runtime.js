@@ -56,6 +56,8 @@
         if (m.type === "progress") { engine.stage = m.stage; return; }
         if (m.type === "ready") { engine.stage = ""; engine.readyMs = m.ms; engine.ready = true; res(); return; }
         if (m.type === "fatal") { workerFailed(m.error); return; }
+        // 运行中崩溃（内存不够）：这次调用已经收到报错，丢掉这个 worker，下次用到时重新启动
+        if (m.type === "crashed") { try { worker?.terminate(); } catch (err) {} worker = null; dataLoaded = null; histLoaded = new Set(); engine.ready = false; return; }
         const p = pending.get(m.id); if (!p) return;
         pending.delete(m.id); clearTimeout(p.timer);
         m.ok ? p.resolve(m.result) : p.reject(new Error(m.error));
