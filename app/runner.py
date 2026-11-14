@@ -48,6 +48,10 @@ def _clean(v):
     return v
 
 
+# 传给 screen 之前先复制一份，免得规则代码改到缓存的数据。网页版的 data.load 每次已经给一份新的，设成 False 省内存
+COPY_INPUT = True
+
+
 def execute(market: str, start: str, end: str, code: str) -> dict:
     t0 = time.time()
     daily, stocks = data.load(market, start, end)
@@ -59,7 +63,7 @@ def execute(market: str, start: str, end: str, code: str) -> dict:
     if not callable(screen):
         raise ValueError("没有找到 screen 函数")
 
-    result = screen(daily.copy(), stocks.copy(), pd.Timestamp(start), pd.Timestamp(end))
+    result = screen(daily.copy() if COPY_INPUT else daily, stocks.copy(), pd.Timestamp(start), pd.Timestamp(end))
     if isinstance(result, pd.Series):
         result = result.to_frame()
     if not isinstance(result, pd.DataFrame):
@@ -120,7 +124,10 @@ def builtin_columns(codes: pd.Series, daily: pd.DataFrame, stocks: pd.DataFrame,
     out["total_mv"] = s["total_mv"] / 1e8
     out["float_mv"] = s["float_mv"] / 1e8
 
-    d = daily[daily["code"].isin(set(codes)) & (daily["date"] <= pd.Timestamp(end))]
+    # 只取要用的几列再过滤（规则代码可能往 daily 里加了很多列，整表复制很占内存）
+    m = daily["code"].isin(set(codes)) & (daily["date"] <= pd.Timestamp(end))
+    d = daily.loc[m, ["code", "date", "close", "pct_chg", "turnover", "amount"]]
+    del m
     last = d.groupby("code").tail(1).set_index("code")
     out["end_pct"] = last["pct_chg"]
     out["end_turnover"] = last["turnover"]
@@ -134,7 +141,7 @@ def builtin_columns(codes: pd.Series, daily: pd.DataFrame, stocks: pd.DataFrame,
         dd = r["close"] / g["close"].cummax() - 1
         out["range_mdd"] = dd.groupby(r["code"]).min() * 100
         out["range_amount"] = g["amount"].mean() / 1e8
-        out["range_vol"] = r.assign(rr=g["close"].pct_change()).groupby("code")["rr"].std() * np.sqrt(252) * 100
+        out["range_vol"] = g["close"].pct_change().groupby(r["code"]).std() * np.sqrt(252) * 100
     cols = [{"id": i, "label": lb, "group": gr} for i, lb, gr in BUILTIN]
     rows = []
     for row in out.reindex(columns=[c[0] for c in BUILTIN]).itertuples(index=False, name=None):
