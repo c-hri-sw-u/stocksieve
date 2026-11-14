@@ -582,7 +582,9 @@ async function run(opts = {}) {
     }
     render(j);
   } catch (e) {
-    $("#result").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+    const engine = /计算环境/.test(e.message);  // 网页版：浏览器里的 Python 没加载成功，给个重试
+    $("#result").innerHTML = `<div class="err">${esc(e.message)}${engine ? `<div style="margin-top:12px"><button class="secondary" id="retryRun">重试</button></div>` : ""}</div>`;
+    $("#retryRun")?.addEventListener("click", () => run(opts));
   } finally { $("#run").disabled = false; }
 }
 

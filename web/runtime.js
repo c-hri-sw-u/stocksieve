@@ -22,32 +22,50 @@
   // ---------------------------------------------------------------- 计算 worker
   let worker = null, seq = 0, pending = new Map(), workerReady = null, dataLoaded = null;
   const engine = { stage: "", readyMs: null };
+  const LOAD_TIMEOUT = 150000;  // 计算环境（Python + pandas）最多等 150 秒
+  // 计算环境起不来时：所有等待中的调用立刻失败，下次用到时重新启动 worker（相当于「重试」）
+  function workerFailed(msg) {
+    const err = new Error("计算环境加载失败：" + msg);
+    err.kind = "engine";
+    engine.stage = ""; engine.error = err.message; engine.ready = false;
+    try { worker?.terminate(); } catch (e) {}
+    worker = null; dataLoaded = null;
+    for (const q of pending.values()) { clearTimeout(q.timer); q.reject(err); }
+    pending.clear();
+  }
   function startWorker() {
+    engine.error = null; engine.ready = false;
     worker = new Worker("worker.js");
     workerReady = new Promise((res) => {
       worker.onmessage = (e) => {
         const m = e.data;
         if (m.type === "progress") { engine.stage = m.stage; return; }
-        if (m.type === "ready") { engine.stage = ""; engine.readyMs = m.ms; res(); return; }
+        if (m.type === "ready") { engine.stage = ""; engine.readyMs = m.ms; engine.ready = true; res(); return; }
+        if (m.type === "fatal") { workerFailed(m.error); return; }
         const p = pending.get(m.id); if (!p) return;
         pending.delete(m.id); clearTimeout(p.timer);
         m.ok ? p.resolve(m.result) : p.reject(new Error(m.error));
       };
+      worker.onerror = (e) => { e.preventDefault?.(); workerFailed(e.message || "worker 出错"); };
     });
     dataLoaded = null;
   }
   function call(cmd, args = [], timeout = 0) {
     if (!worker) startWorker();
     const id = ++seq;
+    // 计算环境还没准备好时，多给加载的时间；永远不会无限等待
+    const loading = !engine.ready;
+    const limit = (timeout || 60000) + (loading ? LOAD_TIMEOUT : 0);
     return new Promise((resolve, reject) => {
       const p = { resolve, reject, timer: null };
-      if (timeout) p.timer = setTimeout(() => {
+      p.timer = setTimeout(() => {
         // 超时：直接结束 worker（停止计算），下次用到时重新启动
-        pending.delete(id); worker.terminate(); worker = null;
-        for (const q of pending.values()) q.reject(new Error("计算已中止"));
+        pending.delete(id); worker?.terminate(); worker = null; dataLoaded = null;
+        for (const q of pending.values()) { clearTimeout(q.timer); q.reject(new Error("计算已中止")); }
         pending.clear();
-        reject(new Error(`运行超时（超过 ${timeout / 1000} 秒），请简化计算`));
-      }, timeout);
+        reject(new Error(loading && !engine.ready ? "计算环境加载超时：Python 运行环境下载太慢（网络问题），请重试"
+                                                  : `运行超时（超过 ${(timeout || 60000) / 1000} 秒），请简化计算`));
+      }, limit);
       pending.set(id, p);
       worker.postMessage({ id, cmd, args });
     });
@@ -56,6 +74,7 @@
     if (!worker) startWorker();
     if (!dataLoaded) {
       dataLoaded = complete() ? call("loadData", [index.manifest]) : Promise.resolve({ ok: false });
+      dataLoaded.catch(() => { dataLoaded = null; });
     }
     return dataLoaded;
   }
@@ -170,7 +189,7 @@
   }
   async function runCode(market, start, end, code) {
     try { return await call("run", [market, start, end, code], EXEC_TIMEOUT); }
-    catch (e) { return { ok: false, error: e.message }; }
+    catch (e) { if (e.kind === "engine" || /计算环境/.test(e.message)) throw e; return { ok: false, error: e.message }; }
   }
 
   // ---------------------------------------------------------------- AI（浏览器直接调服务商，key 只在本机）
@@ -292,7 +311,7 @@
       async start(c) {
         const emit = (e) => c.enqueue(enc.encode(JSON.stringify(e) + "\n"));
         try { emit({ type: "result", ...(await generateAndRun(req, ai, emit, ctrl.signal)) }); }
-        catch (e) { emit({ type: "error", code: "ai_" + (e.kind || "other"), message: "AI 调用失败：" + e.message }); }
+        catch (e) { emit({ type: "error", code: "ai_" + (e.kind || "other"), message: e.kind === "engine" || /计算环境/.test(e.message) ? e.message : "AI 调用失败：" + e.message }); }
         c.close();
       },
       cancel() { ctrl.abort(); },
@@ -300,17 +319,35 @@
     return new Response(stream, { headers: { "Content-Type": "application/x-ndjson" } });
   }
 
+  // 模型参数规则的 JS 版：只给「测试连接」用，这样测试不依赖浏览器里的 Python（它可能还没加载好或加载失败）。
+  // 必须和 app/prompts.py 的 call_params / MAX_TOKENS 保持一致（两处同步修改）。
+  const EFFORTS = ["none", "low", "high", "max"], LEGACY_DS = ["deepseek-chat", "deepseek-reasoner"];
+  const HINTS = ["reasoner", "r1", "think", "reason", "o1", "o3", "o4"];
+  const MAX_TOKENS = { none: 8000, low: 32000, high: 64000, max: 128000 };
+  function callParamsJS(provider, model, effort) {
+    const m = (model || "").toLowerCase();
+    if (provider === "deepseek" && m.startsWith("deepseek-") && !LEGACY_DS.includes(m)) {
+      const e = EFFORTS.includes(effort) ? effort : "high";
+      return { reasoning: e !== "none", extra: { reasoning_effort: e }, max_tokens: MAX_TOKENS[e] };
+    }
+    const r = provider === "deepseek" ? m === "deepseek-reasoner" : HINTS.some((h) => m.includes(h));
+    return { reasoning: r, extra: {}, max_tokens: r ? 32000 : 8000 };
+  }
+
   async function aiTest(ai) {
     const t0 = performance.now();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20000);
     try {
-      const p = await py("call_params", ai.provider, ai.model, "none");
-      await chat(ai, ai.model, [{ role: "user", content: "ping" }], { ...p, max_tokens: 1, reasoning: false }, () => {});
+      const p = callParamsJS(ai.provider, ai.model, "none");
+      await chat(ai, ai.model, [{ role: "user", content: "ping" }], { ...p, max_tokens: 1, reasoning: false }, () => {}, ctrl.signal);
       return { ok: true, ms: Math.round(performance.now() - t0), error_kind: null, message: `连接成功 · ${PROVIDERS[ai.provider].label} · ${ai.model}` };
     } catch (e) {
       // 只要求 1 个 token，JSON 模式下可能被判为截断，这也说明 key 和模型都是通的
       if (e.message.includes("截断")) return { ok: true, ms: Math.round(performance.now() - t0), error_kind: null, message: `连接成功 · ${PROVIDERS[ai.provider].label} · ${ai.model}` };
+      if (ctrl.signal.aborted) return { ok: false, ms: Math.round(performance.now() - t0), error_kind: "network", message: "连接超时（20 秒没有响应），请检查网络或代理" };
       return { ok: false, ms: Math.round(performance.now() - t0), error_kind: e.kind || "other", message: e.message };
-    }
+    } finally { clearTimeout(timer); }
   }
 
   // ---------------------------------------------------------------- /api/* 就地实现

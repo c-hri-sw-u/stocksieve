@@ -30,6 +30,7 @@ def main() -> None:
     ap.add_argument("--no-data", action="store_true", help="不导出数据（数据由别的步骤放进 site/data）")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--years", type=float, default=0)
+    ap.add_argument("--no-pyodide", action="store_true", help="不把 Pyodide 放进网站（只用 CDN）")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -56,6 +57,9 @@ def main() -> None:
     from app.examples import EXAMPLES
     (out / "examples.json").write_text(json.dumps(EXAMPLES, ensure_ascii=False), "utf-8")
     (out / ".nojekyll").write_text("")
+
+    if not args.no_pyodide:  # 自托管 Pyodide，不依赖 cdn.jsdelivr.net
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "fetch_pyodide.py"), "--out", str(out / "pyodide")], check=True)
 
     if not args.no_data:
         cmd = [sys.executable, str(ROOT / "scripts" / "export_site_data.py"), "--out", str(out / "data")]
