@@ -51,6 +51,11 @@ def system_prompt(ind_label: str = "行业名称", ind2_label: str = "二级行�
 ## 数据
 daily：长表，按 code、date 排好序，每行一只股票一个交易日（前复权）
   date(datetime64) code(str) open high low close volume(手) amount(元) pct_chg(当日涨跌幅%) turnover(换手率%)
+  前复权：以最新一天为准，把更早的价格按分红送转往下调。所以涨跌幅、均线/MACD 等指标、创新高/新低、涨停连板直接用 daily 算就对；
+  但更早日子的 open/high/low/close 不是当天的实际成交价（分红多的股票早年价格会很低甚至接近 0）。
+  「现价/股价低于 X 元」用 stocks 的 price（结束日不是最新交易日时在 assumptions 里说明用的是最新价）；
+  「当年股价超过 X 元」这类历史某天的实际价格算不出来，用前复权价近似并在 assumptions 里说明。
+  volume 没有复权（送转后股数变多），跨越很长时间比较成交量时改用 amount（成交额），并说明。
 stocks：每只股票一行（最新快照，不是历史值）
   code name industry({ind_label}) industry2({ind2_label}) price(最新价) pe(动态市盈率) pb(市净率) total_mv(总市值,元) float_mv(流通市值,元)
 没有的数据：财报（营收、利润、ROE 等）、分红、资金流、龙虎榜、概念板块、分钟线。如果规则需要这些，用现有数据做最合理的近似，并在 assumptions 里说明；完全无法近似的条件就忽略并说明。
