@@ -4,7 +4,9 @@ worker.js 调这里的函数，参数和返回值都是 JSON 字符串。
 """
 from __future__ import annotations
 
+import gc
 import json
+import re
 import time
 
 import numpy as np
@@ -190,7 +192,11 @@ def add_history(names_json: str, folder: str) -> str:
 
 # 一次筛选最多用多少行（含预热）。浏览器里 Python 最多 4 GB 内存，规则代码本身还会复制几份数据，
 # 实测 900 万行（约全市场 6 年）时峰值约 2.3 GB，再多就可能把计算环境撑崩。
+# 超过时：只看单只股票自身走势的规则，把股票分成几批分别算再合起来（慢一些）；
+# 要在股票之间比较的规则（排名、前 N 名、全市场平均等）分批会算错，只能提示缩短时间范围。
 MAX_ROWS = 9_000_000
+BATCH_ROWS = 4_000_000
+BATCH = {"codes": None}  # 分批计算时，这一批的股票（按代码编号的布尔数组）
 
 
 class RangeTooLarge(Exception):
@@ -212,14 +218,17 @@ def _load(market, start=None, end=None):
         mask &= (d["date"] >= pd.Timestamp(start) - pd.Timedelta(days=prompts.LOOKBACK_DAYS)).to_numpy()
     if end:
         mask &= (d["date"] <= pd.Timestamp(end)).to_numpy()
+    if BATCH["codes"] is not None:
+        mask &= BATCH["codes"][STATE["idx"]]
+        s = s[s["code"].isin(set(STATE["cats"][BATCH["codes"]]))]
     n = int(mask.sum())
-    if n > MAX_ROWS:
+    if n > MAX_ROWS and BATCH["codes"] is None:
         # 算出最早能从哪天开始：从结束日往前数，行数不超过上限（再留出预热的天数）
         dates = d["date"].to_numpy()[mask]
         u, cnt = np.unique(dates, return_counts=True)
         keep = np.cumsum(cnt[::-1]) <= MAX_ROWS
         earliest = pd.Timestamp(u[::-1][keep][-1]) + pd.Timedelta(days=prompts.LOOKBACK_DAYS)
-        raise RangeTooLarge(f"时间范围太长，浏览器内存不够算这么多数据。请把开始日期改到 {earliest:%Y-%m-%d} 或之后再试")
+        raise RangeTooLarge(f"{earliest:%Y-%m-%d}")
     out = _frame(d["date"].to_numpy()[mask], d["code"].to_numpy()[mask], lambda c: d[c].to_numpy()[mask], np.float64)
     return out, s.copy()
 
@@ -237,15 +246,75 @@ def run(market: str, start: str, end: str, code: str) -> str:
     except sandbox.UnsafeCode as e:
         return _j({"ok": False, "error": str(e)})
     try:
-        return _j(runner.execute(market, start, end, code))
-    except RangeTooLarge as e:
-        return _j({"ok": False, "error": str(e)})
+        try:
+            return _j(runner.execute(market, start, end, code))
+        except RangeTooLarge as e:
+            if _cross_sectional(code):
+                tip = f"请把开始日期改到 {e} 或之后再试" if str(e) <= end else "请缩短时间范围再试"
+                return _j({"ok": False, "error": f"时间范围太长：这条规则要在股票之间比较（排名、前几名、全市场平均等），没法分批算，"
+                                                  f"浏览器内存不够一次算完。{tip}"})
+            return _j(_run_batched(market, start, end, code))
     except MemoryError:
         return _j({"ok": False, "error": "浏览器内存不够：时间范围太长、数据太多。请缩短时间范围再试"})
     except Exception as e:  # noqa: BLE001
         import traceback
 
         return _j({"ok": False, "error": f"{type(e).__name__}: {e}", "traceback": traceback.format_exc(limit=-3)[-2000:]})
+
+
+# 规则代码里出现这些写法，说明要在股票之间比较，不能分批算（宁可多判，不分批只是提示缩短范围）
+CROSS = re.compile(r"""groupby\(\s*\[?\s*["']date|\.rank\(|nlargest|nsmallest|quantile\(|\.head\(|axis\s*=\s*1|["']rank["']|pct\s*=\s*True""")
+
+
+def _cross_sectional(code: str) -> bool:
+    return bool(CROSS.search(code))
+
+
+def _run_batched(market: str, start: str, end: str, code: str) -> dict:
+    """股票分几批，每批数据量在 BATCH_ROWS 以内，分别跑同一段规则，再把结果合起来。"""
+    d = STATE["daily"]
+    mask = np.ones(len(d), dtype=bool)
+    mask &= (d["date"] >= pd.Timestamp(start) - pd.Timedelta(days=prompts.LOOKBACK_DAYS)).to_numpy()
+    mask &= (d["date"] <= pd.Timestamp(end)).to_numpy()
+    rows_per_code = np.bincount(STATE["idx"][mask], minlength=len(STATE["cats"]))
+    del mask
+    groups, cur, acc = [], [], 0
+    for i, n in enumerate(rows_per_code):
+        if cur and acc + n > BATCH_ROWS:
+            groups.append(cur)
+            cur, acc = [], 0
+        cur.append(i)
+        acc += n
+    if cur:
+        groups.append(cur)
+    results = []
+    try:
+        for g in groups:
+            sel = np.zeros(len(STATE["cats"]), dtype=bool)
+            sel[g] = True
+            BATCH["codes"] = sel
+            results.append(runner.execute(market, start, end, code))
+            gc.collect()
+    finally:
+        BATCH["codes"] = None
+    cols = next((r["columns"] for r in results if r["rows"]), results[0]["columns"])
+    if any(r["rows"] and r["columns"] != cols for r in results):
+        raise ValueError("分批计算时各批返回的列不一样，请把规则写成每只股票单独判断")
+    pairs = [(row, b) for r in results for row, b in zip(r["rows"], r["builtin_rows"])]
+    sort = next((r["default_sort"] for r in results if r["default_sort"] and r["default_sort"]["column"] in cols), None)
+    if sort:  # 各批各自排好序，合起来以后按同一列重新排
+        k = cols.index(sort["column"])
+        num = [p for p in pairs if isinstance(p[0][k], (int, float))]
+        rest = [p for p in pairs if not isinstance(p[0][k], (int, float))]
+        num.sort(key=lambda p: p[0][k], reverse=sort["dir"] == "desc")
+        pairs = num + rest
+    pairs = pairs[: runner.config.MAX_ROWS]
+    out = dict(results[0])
+    out.update(rows=[p[0] for p in pairs], builtin_rows=[p[1] for p in pairs], columns=cols, default_sort=sort,
+               total=sum(r["total"] for r in results), universe=sum(r["universe"] for r in results),
+               load_seconds=round(sum(r["load_seconds"] for r in results), 2),
+               run_seconds=round(sum(r["run_seconds"] for r in results), 2), batches=len(groups))
+    return out
 
 
 def examples() -> str:

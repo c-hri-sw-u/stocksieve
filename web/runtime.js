@@ -5,7 +5,7 @@
 (function () {
   const realFetch = window.fetch.bind(window);
   const INDEX_KEY = "xg.data.v1";
-  const EXEC_TIMEOUT = 90000;
+  const EXEC_TIMEOUT = 240000;  // 时间范围很长时会分批算，慢一些
   const MARKETS = { cn_a: { label: "A股", enabled: true }, hk: { label: "港股", enabled: false }, us: { label: "美股", enabled: false } };
   const AI_DEFAULTS = { deepseek: "deepseek-flash", openrouter: "deepseek/deepseek-chat" };
   const PROVIDERS = {
