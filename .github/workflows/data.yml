@@ -179,6 +179,11 @@ jobs:
           gh release upload data-latest data/cn_a/daily.parquet data/cn_a/stocks.parquet data/cn_a/meta.json $(ls data/cn_a/industry.parquet data/cn_a/spot_cache.parquet data/cn_a/sw_levels.json data/cn_a/industry_sw_partial.json 2>/dev/null) --clobber
       - name: 下载更早的历史（只准备一次，见 history.yml）
         run: gh release download data-history -D data/history --pattern '*' --clobber || echo "还没有更早的历史数据"
+      - name: 缓存 Pyodide（版本不变就不用每次从 CDN 下载）
+        uses: actions/cache@v4
+        with:
+          path: data/pyodide-cache
+          key: pyodide-${{ hashFiles('scripts/fetch_pyodide.py') }}
       - name: 生成静态网站
         run: |
           python scripts/build_web.py --no-data
